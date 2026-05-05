@@ -73,12 +73,11 @@ class ConversationalFlow(Flow[ConversationalState]):
 
     @listen("CREWAI_DOCS")
     def handle_crewai_docs(self):
-        message = Message(
-            role="assistant",
-            content=CrewaiDocsCrew(
-                messages=self.state.messages,
-            ).execute(),
-        )
+        execution_result = CrewaiDocsCrew(
+            user_message=self.state.user_message,
+            messages=self.state.messages,
+        ).execute()
+        message = Message(role="assistant", content=execution_result.agent_response)
         self.state.messages.append(message)
         return message
 

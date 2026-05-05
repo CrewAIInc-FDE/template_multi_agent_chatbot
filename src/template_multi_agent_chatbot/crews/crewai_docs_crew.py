@@ -1,11 +1,21 @@
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from crewai import LLM, Agent, Crew, Process, Task
-from crewai_tools import MongoDBVectorSearchConfig, MongoDBVectorSearchTool
+from crewai_tools import MongoDBVectorSearchConfig
+from pydantic import BaseModel
 
+from template_multi_agent_chatbot.tools import TrackedMongoDBVectorSearchTool
 from template_multi_agent_chatbot.types import Message
+
+
+class CrewExecutionResult(BaseModel):
+    user_message: str
+    query_chunks: list[dict[str, list[dict[str, Any]]]]
+    agent_response: str
+
 
 _DOCS_SKILL_PATH = str(
     Path(__file__).resolve().parent.parent / "skills" / "crewai-docs"
@@ -14,8 +24,10 @@ _NEWLINE = "\n"
 
 
 class CrewaiDocsCrew:
-    def __init__(self, messages: list[Message]):
+    def __init__(self, user_message: Message, messages: list[Message]):
+        self._user_message = user_message
         self._messages = messages
+        self._query_chunks: list[dict[str, list[dict[str, Any]]]] = []
 
     def _agent(self) -> Agent:
         return Agent(
@@ -40,7 +52,8 @@ check the official docs at https://docs.crewai.com.""",
             llm=LLM(model="gemini/gemini-3.1-pro-preview", stream=True),
             skills=[_DOCS_SKILL_PATH],
             tools=[
-                MongoDBVectorSearchTool(
+                TrackedMongoDBVectorSearchTool(
+                    query_chunks=self._query_chunks,
                     connection_string=os.environ["MONGODB_CONNECTION_STRING"],
                     database_name=os.environ["MONGODB_DATABASE_NAME"],
                     collection_name=os.environ["MONGODB_COLLECTION_NAME"],
@@ -84,5 +97,10 @@ KEY RULES:
             verbose=True,
         )
 
-    def execute(self) -> str:
-        return self._crew().kickoff().raw
+    def execute(self) -> CrewExecutionResult:
+        raw = self._crew().kickoff().raw
+        return CrewExecutionResult(
+            user_message=self._user_message.content,
+            query_chunks=self._query_chunks,
+            agent_response=raw,
+        )
