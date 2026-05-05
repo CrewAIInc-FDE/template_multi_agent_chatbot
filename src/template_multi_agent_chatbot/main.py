@@ -79,7 +79,7 @@ class ConversationalFlow(Flow[ConversationalState]):
         ).execute()
         message = Message(role="assistant", content=execution_result.agent_response)
         self.state.messages.append(message)
-        return message
+        return execution_result
 
     @listen(
         or_(
