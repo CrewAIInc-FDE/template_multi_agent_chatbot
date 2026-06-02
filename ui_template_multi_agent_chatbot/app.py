@@ -27,14 +27,16 @@ DEPLOYMENT_KEY = os.environ["DEPLOYMENT_KEY"]
 WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
+# Events AMP relays via webhook. llm_thinking_chunk and image_generated are
+# intentionally omitted here: the flow pushes those straight to the channel
+# webhook (see ConversationalEventListener) to avoid duplicate delivery.
 WEBHOOK_EVENTS = [
     "flow_started",
     "flow_finished",
     "llm_stream_chunk",
-    "llm_thinking_chunk",
     "tool_usage_started",
     "tool_usage_finished",
-    "image_generated",
+    "tool_usage_error",
 ]
 
 app = Flask(__name__)
@@ -193,13 +195,16 @@ def send_message(channel_id):
 
     msg = db.add_message(channel_id, role="user", content=content)
 
+    callback_url = f"{_public_base_url()}/api/webhook/{channel_id}"
+
     kickoff_body = {
         "inputs": {
             "user_message": {"role": "user", "content": content},
+            "webhook_url": callback_url,
         },
         "webhooks": {
             "events": WEBHOOK_EVENTS,
-            "url": f"{_public_base_url()}/api/webhook/{channel_id}",
+            "url": callback_url,
             "realtime": True,
             "authentication": {"strategy": "bearer", "token": WEBHOOK_TOKEN},
         },
@@ -326,10 +331,12 @@ def webhook(channel_id):
         events = [payload]
 
     for ev in events:
+        etype = ev.get("type") if isinstance(ev, dict) else None
+        app.logger.info("Webhook received event channel=%s type=%s", channel_id, etype)
         try:
             _handle_event(channel_id, ev)
         except Exception as e:
-            app.logger.warning("Failed to handle event: %s", e)
+            app.logger.warning("Failed to handle event (type=%s): %s", etype, e)
 
     return jsonify({"status": "ok"}), 200
 

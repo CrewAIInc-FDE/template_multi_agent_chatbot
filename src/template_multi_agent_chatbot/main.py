@@ -99,8 +99,8 @@ def kickoff():
             "user_message": {
                 "role": "user",
                 # "content": "Hello, how are you?",  # SIMPLE ROUTE
-                # "content": "Generate an image of an otter playing with a ball", # IMAGE ROUTE
-                # "content": "Do a quick search about retro emulation", # SEARCH ROUTE
+                # "content": "Generate an image of an otter playing with a ball",  # IMAGE ROUTE
+                # "content": "Do a quick search about retro emulation",  # INTERNET SEARCH ROUTE
                 "content": "How do I create a crew with custom tools in CrewAI?",  # CREWAI DOCS ROUTE
             },
         }

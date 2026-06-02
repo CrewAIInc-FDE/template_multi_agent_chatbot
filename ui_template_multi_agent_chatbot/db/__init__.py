@@ -30,9 +30,6 @@ _SCHEMA = """
 
     CREATE INDEX IF NOT EXISTS idx_messages_channel
         ON messages(channel_id, timestamp);
-
-    CREATE INDEX IF NOT EXISTS idx_channels_conversation
-        ON channels(conversation_id);
 """
 
 
@@ -124,16 +121,6 @@ def get_channel(channel_id):
     conn.close()
     channel["messages"] = [dict(m) for m in messages]
     return channel
-
-
-def get_channel_by_conversation_id(conversation_id):
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM channels WHERE conversation_id = ?",
-        (conversation_id,),
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
 
 
 def update_channel_state_id(channel_id, state_id):
