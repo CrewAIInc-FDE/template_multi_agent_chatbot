@@ -7,7 +7,10 @@ from arize.otel import register
 from crewai.flow import Flow, listen, or_, persist, router, start
 from openinference.instrumentation.crewai import CrewAIInstrumentor
 
-from template_multi_agent_chatbot.agents import MessageClassifierAgent
+from template_multi_agent_chatbot.agents import (
+    MessageClassifierAgent,
+    SimpleResponseAgent,
+)
 from template_multi_agent_chatbot.crews import (
     CrewaiDocsCrew,
     ImageCreationCrew,
@@ -35,17 +38,16 @@ class ConversationalFlow(Flow[ConversationalState]):
     def classify_message(
         self,
     ) -> Literal["SIMPLE", "IMAGE_CREATION_UPDATE", "INTERNET_SEARCH", "CREWAI_DOCS"]:
-        classification, response = MessageClassifierAgent(
-            messages=self.state.messages,
-        ).execute()
-
-        self.state.messages.append(Message(role="assistant", content=response))
-
-        return classification
+        return MessageClassifierAgent(messages=self.state.messages).execute()
 
     @listen("SIMPLE")
     def handle_simple_message(self):
-        pass
+        message = Message(
+            role="assistant",
+            content=SimpleResponseAgent(messages=self.state.messages).execute(),
+        )
+        self.state.messages.append(message)
+        return message
 
     @listen("IMAGE_CREATION_UPDATE")
     def handle_image_creation(self):
@@ -98,10 +100,10 @@ def kickoff():
         inputs={
             "user_message": {
                 "role": "user",
-                # "content": "Hello, how are you?",  # SIMPLE ROUTE
+                "content": "Hello, how are you?",  # SIMPLE ROUTE
                 # "content": "Generate an image of an otter playing with a ball",  # IMAGE ROUTE
                 # "content": "Do a quick search about retro emulation",  # INTERNET SEARCH ROUTE
-                "content": "How do I create a crew with custom tools in CrewAI?",  # CREWAI DOCS ROUTE
+                # "content": "How do I create a crew with custom tools in CrewAI?",  # CREWAI DOCS ROUTE
             },
         }
     )
