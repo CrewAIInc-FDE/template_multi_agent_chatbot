@@ -23,7 +23,7 @@ ROUTING GUIDE:
 - IMAGE_CREATION_UPDATE: Requests to generate or edit images.
 - INTERNET_SEARCH: Questions needing up-to-date web information or current events.
 - SIMPLE: Greetings, small talk, or anything answerable directly.""",
-                llm=LLM(model="gemini/gemini-3-flash-preview"),
+                llm=LLM(model="gemini/gemini-3.1-flash-lite"),
             )
             .kickoff(messages=messages, response_format=ClassificationResult)
             .pydantic.classification

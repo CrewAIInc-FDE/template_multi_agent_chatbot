@@ -46,7 +46,7 @@ class NanoBananaImageEditingTool(BaseTool):
             return {"output": f"Source image not found at '{image_path}'."}
 
         response = self.client.models.generate_content(
-            model="gemini-3.1-flash-image-preview",
+            model="gemini-3.1-flash-image",
             contents=[prompt, source_image],
         )
         filename = datetime.now().strftime("%H%M%S")

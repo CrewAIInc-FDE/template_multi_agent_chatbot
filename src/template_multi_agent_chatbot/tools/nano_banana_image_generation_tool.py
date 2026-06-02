@@ -30,7 +30,7 @@ class NanoBananaImageGenerationTool(BaseTool):
 
     def _run(self, prompt: str) -> str:
         response = self.client.models.generate_content(
-            model="gemini-3.1-flash-image-preview",
+            model="gemini-3.1-flash-image",
             contents=[prompt],
         )
         filename = datetime.now().strftime("%H%M%S")

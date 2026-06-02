@@ -20,7 +20,7 @@ class SimpleResponseAgent:
 streamed live to the user, so write as if speaking to them directly.
 Read the history to avoid repeating greetings or phrases.
 CRITICAL: respond solely in the same language the user is using.""",
-                llm=LLM(model="gemini/gemini-3-flash-preview", stream=True),
+                llm=LLM(model="gemini/gemini-3.1-flash-lite", stream=True),
             )
             .kickoff(messages=messages)
             .raw
