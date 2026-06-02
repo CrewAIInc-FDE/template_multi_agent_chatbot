@@ -13,6 +13,7 @@ import db
 import requests as http_requests
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -23,10 +24,30 @@ load_dotenv(dotenv_path)
 
 DEPLOYMENT_URL = os.environ["DEPLOYMENT_URL"]
 DEPLOYMENT_KEY = os.environ["DEPLOYMENT_KEY"]
-DISPATCHER_KEY = os.environ["DISPATCHER_KEY"]
+WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+WEBHOOK_EVENTS = [
+    "flow_started",
+    "flow_finished",
+    "llm_stream_chunk",
+    "llm_thinking_chunk",
+    "tool_usage_started",
+    "tool_usage_finished",
+    "image_generated",
+]
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 db.init_db()
+
+
+def _public_base_url() -> str:
+    """Public base URL AMP should call back. Prefers the explicit
+    PUBLIC_BASE_URL env var; otherwise derives it from the current request."""
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
+    return request.url_root.rstrip("/")
 
 
 @app.after_request
@@ -37,30 +58,19 @@ def _add_cors(response):
     return response
 
 
-@app.route("/api/webhook", methods=["OPTIONS"])
-def webhook_preflight():
-    return "", 204
-
-
 _sse_subscribers: dict[str, list[queue.Queue]] = {}
 _sse_lock = threading.Lock()
 
-_active_thinking: dict[str, dict] = {}  # conv_id → {call_id, text}
-_active_responses: dict[str, dict] = {}  # conv_id → {call_id, text, agent_role, channel_id}
+_active_thinking: dict[str, dict] = {}
+_active_responses: dict[str, dict] = {}
 
+_last_event_at: dict[str, float] = {}
+_pending_kickoffs: dict[str, str] = {}
+_finalized_kickoffs: set[str] = set()
+_kickoff_lock = threading.Lock()
 
-def _persist_response(conversation_id: str):
-    """Flush the accumulated response text for a conversation to the DB."""
-    ar = _active_responses.pop(conversation_id, None)
-    if ar and ar["text"].strip():
-        db.add_message(
-            ar["channel_id"],
-            role="assistant",
-            content=ar["text"],
-            event_type="assistant_message",
-            event_id=f"stream:{ar['call_id']}",
-            agent_role=ar.get("agent_role"),
-        )
+_IDLE_TIMEOUT = 10
+_WATCHDOG_MAX_LIFETIME = 60
 
 
 def _parse_dt(val) -> float:
@@ -185,15 +195,24 @@ def send_message(channel_id):
 
     kickoff_body = {
         "inputs": {
-            "id": channel["conversation_id"],
             "user_message": {"role": "user", "content": content},
+        },
+        "webhooks": {
+            "events": WEBHOOK_EVENTS,
+            "url": f"{_public_base_url()}/api/webhook/{channel_id}",
+            "realtime": True,
+            "authentication": {"strategy": "bearer", "token": WEBHOOK_TOKEN},
         },
     }
 
-    app.logger.info("Kickoff body: %s", json.dumps(kickoff_body, default=str))
+    last_state_id = channel.get("last_state_id")
+    if last_state_id:
+        kickoff_body["restoreFromStateId"] = last_state_id
+
     app.logger.info(
-        "Kickoff → id=%s content=%s",
-        channel["conversation_id"],
+        "Kickoff -> channel=%s restore=%s content=%s",
+        channel_id,
+        last_state_id,
         content[:80],
     )
 
@@ -207,52 +226,37 @@ def send_message(channel_id):
             )
             if not resp.ok:
                 app.logger.error(
-                    "Kickoff HTTP %s: %s",
-                    resp.status_code,
-                    resp.text[:500],
+                    "Kickoff HTTP %s: %s", resp.status_code, resp.text[:500]
                 )
             resp.raise_for_status()
             result = resp.json()
-            app.logger.info("Kickoff OK: %s", result)
+            kickoff_id = result.get("kickoff_id")
+            app.logger.info("Kickoff OK: %s", kickoff_id)
+            if kickoff_id:
+                db.update_channel_state_id(channel_id, kickoff_id)
+                with _kickoff_lock:
+                    _pending_kickoffs[channel_id] = kickoff_id
+                    _finalized_kickoffs.discard(kickoff_id)
+                    _last_event_at[channel_id] = time.time()
+                threading.Thread(
+                    target=_status_watchdog,
+                    args=(channel_id, kickoff_id),
+                    daemon=True,
+                ).start()
             _broadcast_to_channel(
                 channel_id,
-                {
-                    "type": "kickoff_started",
-                    "kickoff_id": result.get("kickoff_id"),
-                },
+                {"type": "kickoff_started", "kickoff_id": kickoff_id},
             )
         except Exception as e:
             app.logger.error("Kickoff failed: %s", e)
             _broadcast_to_channel(
                 channel_id,
-                {
-                    "type": "kickoff_error",
-                    "error": str(e),
-                },
+                {"type": "kickoff_error", "error": str(e)},
             )
 
     threading.Thread(target=_do_kickoff, daemon=True).start()
 
     return jsonify({"status": "sent", "message": msg}), 202
-
-
-# ---------------------------------------------------------------------------
-# Status proxy
-# ---------------------------------------------------------------------------
-
-
-@app.route("/api/channels/<channel_id>/status/<kickoff_id>", methods=["GET"])
-def get_status(channel_id, kickoff_id):
-    try:
-        resp = http_requests.get(
-            f"{DEPLOYMENT_URL}/{kickoff_id}/status",
-            headers=_crewai_headers(),
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return jsonify(resp.json())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 502
 
 
 # ---------------------------------------------------------------------------
@@ -293,101 +297,100 @@ def channel_events(channel_id):
 
 
 # ---------------------------------------------------------------------------
-# Webhook receiver (from webhook.site XHR forward)
+# Webhook receiver (realtime events from AMP, scoped per channel via URL)
 # ---------------------------------------------------------------------------
 
 
-@app.route("/api/webhook", methods=["POST"])
-def webhook():
+@app.route("/api/webhook/<channel_id>", methods=["OPTIONS"])
+def webhook_preflight(channel_id):
+    return "", 204
+
+
+@app.route("/api/webhook/<channel_id>", methods=["POST"])
+def webhook(channel_id):
     auth = request.headers.get("Authorization", "")
-    if auth != f"Bearer {DISPATCHER_KEY}":
+    if auth != f"Bearer {WEBHOOK_TOKEN}":
         return jsonify({"error": "unauthorized"}), 401
+
+    channel = db.get_channel(channel_id)
+    if not channel:
+        return jsonify({"status": "ignored", "reason": "unknown channel"}), 200
 
     try:
         payload = request.get_json(force=True)
     except Exception:
         return "bad json", 400
 
-    event_type = payload.get("type")
-    event_id = payload.get("event_id")
-    emission_sequence = payload.get("emission_sequence", 0)
-    fingerprint_metadata = payload.get("fingerprint_metadata") or {}
-    conversation_id = fingerprint_metadata.get("conversation_id")
+    events = payload.get("events") if isinstance(payload, dict) else None
+    if events is None:
+        events = [payload]
+
+    for ev in events:
+        try:
+            _handle_event(channel_id, ev)
+        except Exception as e:
+            app.logger.warning("Failed to handle event: %s", e)
+
+    return jsonify({"status": "ok"}), 200
+
+
+def _handle_event(channel_id: str, ev: dict):
+    etype = ev.get("type")
+    execution_id = ev.get("execution_id")
+    d = ev.get("data") or {}
+    seq = d.get("emission_sequence", 0)
+    agent_role = d.get("agent_role", "")
+
+    _last_event_at[channel_id] = time.time()
 
     app.logger.info(
-        "Webhook received: type=%s conversation_id=%s event_id=%s",
-        event_type,
-        conversation_id,
-        event_id,
+        "Webhook event channel=%s type=%s seq=%s call_id=%s",
+        channel_id,
+        etype,
+        seq,
+        d.get("call_id"),
     )
 
-    if not conversation_id:
-        return jsonify({"status": "ignored", "reason": "no conversation_id"}), 200
+    if etype == "flow_started":
+        _active_thinking.pop(channel_id, None)
+        _active_responses.pop(channel_id, None)
+        _broadcast_to_channel(channel_id, {"type": "flow_started", "seq": seq})
 
-    channel = db.get_channel_by_conversation_id(conversation_id)
-    if not channel:
-        app.logger.warning(
-            "No channel found for conversation_id=%s",
-            conversation_id,
-        )
-        return jsonify({"status": "ignored", "reason": "unknown conversation"}), 200
+    elif etype == "llm_stream_chunk":
+        chunk_text = d.get("chunk", "")
+        if d.get("tool_call"):
+            return
+        if not chunk_text:
+            return
 
-    channel_id = channel["id"]
-
-    if event_type == "flow_finished":
-        _active_thinking.pop(conversation_id, None)
-        _persist_response(conversation_id)
-        _broadcast_to_channel(
-            channel_id,
-            {"type": "flow_finished", "seq": emission_sequence},
-        )
-
-    elif event_type == "llm_stream_chunk":
-        call_id = payload.get("call_id")
-        chunk_text = payload.get("chunk", "")
-        agent_role = payload.get("agent_role", "")
-
-        if not payload.get("tool_call") and chunk_text:
-            ar = _active_responses.get(conversation_id)
-            if ar and ar["call_id"] != call_id:
-                _persist_response(conversation_id)
-                ar = None
-            if ar is None and conversation_id not in _active_responses:
-                is_structured = chunk_text.lstrip().startswith(("{", "["))
-                _active_responses[conversation_id] = {
-                    "call_id": call_id,
-                    "text": "",
-                    "agent_role": agent_role,
-                    "channel_id": channel_id,
-                    "structured": is_structured,
-                }
-            ar = _active_responses.get(conversation_id)
-            if ar and not ar.get("structured"):
-                ar["text"] += chunk_text
+        call_id = d.get("call_id")
+        ar = _active_responses.get(channel_id)
+        if ar is None or ar.get("call_id") != call_id:
+            is_structured = chunk_text.lstrip().startswith(("{", "["))
+            ar = {"call_id": call_id, "text": "", "structured": is_structured}
+            _active_responses[channel_id] = ar
+        if not ar.get("structured"):
+            ar["text"] += chunk_text
 
         _broadcast_to_channel(
             channel_id,
             {
                 "type": "llm_stream_chunk",
                 "call_id": call_id,
-                "response_id": payload.get("response_id"),
-                "chunk": payload.get("chunk"),
-                "tool_call": payload.get("tool_call"),
-                "call_type": payload.get("call_type"),
+                "chunk": chunk_text,
                 "agent_role": agent_role,
-                "seq": emission_sequence,
+                "seq": seq,
             },
         )
 
-    elif event_type == "llm_thinking_chunk":
-        call_id = payload.get("call_id")
-        agent_role = payload.get("agent_role", "")
-        chunk_text = payload.get("chunk", "")
+    elif etype == "llm_thinking_chunk":
+        call_id = d.get("call_id")
+        chunk_text = d.get("chunk", "")
 
-        at = _active_thinking.get(conversation_id)
+        at = _active_thinking.get(channel_id)
         if not at or at["call_id"] != call_id:
             at = {"call_id": call_id, "text": ""}
-            _active_thinking[conversation_id] = at
+            _active_thinking[channel_id] = at
         at["text"] += chunk_text
 
         db.upsert_thinking(
@@ -402,85 +405,80 @@ def webhook():
             {
                 "type": "llm_thinking_chunk",
                 "call_id": call_id,
-                "response_id": payload.get("response_id"),
                 "chunk": chunk_text,
                 "agent_role": agent_role,
-                "seq": emission_sequence,
+                "seq": seq,
             },
         )
 
-    elif event_type == "tool_usage_started":
-        tool_name = payload.get("tool_name", "")
+    elif etype == "tool_usage_started":
+        tool_name = d.get("tool_name", "")
         if tool_name != "structured_output":
             _broadcast_to_channel(
                 channel_id,
                 {
                     "type": "tool_usage_started",
                     "tool_name": tool_name,
-                    "agent_role": payload.get("agent_role", ""),
-                    "seq": emission_sequence,
-                },
-            )
-
-    elif event_type == "tool_usage_finished":
-        tool_name = payload.get("tool_name", "")
-        agent_role = payload.get("agent_role", "")
-
-        if tool_name == "structured_output":
-            pass
-
-        elif tool_name:
-            start_ts = _parse_dt(payload.get("started_at"))
-            end_ts = _parse_dt(payload.get("finished_at"))
-            duration_s = round(end_ts - start_ts, 1)
-            db.add_message(
-                channel_id,
-                role="assistant",
-                content=tool_name,
-                event_type="tool_usage",
-                event_id=event_id,
-                agent_role=agent_role,
-                timeline=json.dumps({"duration_s": duration_s}),
-            )
-            _broadcast_to_channel(
-                channel_id,
-                {
-                    "type": "tool_usage_finished",
-                    "tool_name": tool_name,
-                    "duration_s": duration_s,
                     "agent_role": agent_role,
-                    "seq": emission_sequence,
+                    "seq": seq,
                 },
             )
-            app.logger.info(
-                "Tool finished: %s (%.1fs) conv=%s",
-                tool_name,
-                duration_s,
-                conversation_id[:12],
-            )
 
-    elif event_type == "tool_usage_error":
-        tool_name = payload.get("tool_name", "")
+    elif etype == "tool_usage_finished":
+        tool_name = d.get("tool_name", "")
+        if not tool_name or tool_name == "structured_output":
+            return
+        start_ts = _parse_dt(d.get("started_at"))
+        end_ts = _parse_dt(d.get("finished_at"))
+        duration_s = round(end_ts - start_ts, 1)
+        db.add_message(
+            channel_id,
+            role="assistant",
+            content=tool_name,
+            event_type="tool_usage",
+            event_id=d.get("event_id") or ev.get("id"),
+            agent_role=agent_role,
+            timeline=json.dumps({"duration_s": duration_s}),
+        )
+        _broadcast_to_channel(
+            channel_id,
+            {
+                "type": "tool_usage_finished",
+                "tool_name": tool_name,
+                "duration_s": duration_s,
+                "agent_role": agent_role,
+                "seq": seq,
+            },
+        )
+        app.logger.info(
+            "Tool finished: %s (%.1fs) channel=%s",
+            tool_name,
+            duration_s,
+            channel_id[:12],
+        )
+
+    elif etype == "tool_usage_error":
+        tool_name = d.get("tool_name", "")
         if tool_name != "structured_output":
-            error_msg = str(payload.get("error", "Unknown error"))
+            error_msg = str(d.get("error", "Unknown error"))
             _broadcast_to_channel(
                 channel_id,
                 {
                     "type": "tool_usage_error",
                     "tool_name": tool_name,
                     "error": error_msg,
-                    "seq": emission_sequence,
+                    "seq": seq,
                 },
             )
             app.logger.warning(
-                "Tool error: %s — %s conv=%s",
+                "Tool error: %s — %s channel=%s",
                 tool_name,
                 error_msg[:100],
-                conversation_id[:12],
+                channel_id[:12],
             )
 
-    elif event_type == "image_generated":
-        result = payload.get("result", {})
+    elif etype == "image_generated":
+        result = d.get("result", {})
         image_b64 = result.get("image", "")
 
         db.add_message(
@@ -489,8 +487,8 @@ def webhook():
             content="",
             event_type="image_generated",
             image_base64=image_b64,
-            event_id=event_id,
-            agent_role=payload.get("agent_role", ""),
+            event_id=d.get("event_id") or ev.get("id"),
+            agent_role=agent_role,
         )
 
         _broadcast_to_channel(
@@ -502,14 +500,170 @@ def webhook():
                     "content": "",
                     "event_type": "image_generated",
                     "image_base64": image_b64,
-                    "event_id": event_id,
+                    "event_id": d.get("event_id") or ev.get("id"),
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
                 },
-                "seq": emission_sequence,
+                "seq": seq,
             },
         )
 
-    return jsonify({"status": "ok"}), 200
+    elif etype == "flow_finished":
+        ar = _active_responses.get(channel_id)
+        result = d.get("result") or {}
+        final_text = _result_to_text(result)
+        kickoff_id = _pending_kickoffs.get(channel_id) or execution_id or ""
+        _finalize_response(
+            channel_id,
+            kickoff_id,
+            final_text,
+            call_id=ar.get("call_id") if ar else None,
+            seq=seq,
+            agent_role=agent_role,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Flow finalization helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_assistant_text(messages) -> str:
+    for m in reversed(messages or []):
+        if m.get("role") == "assistant" and (m.get("content") or "").strip():
+            return m["content"]
+    return ""
+
+
+def _result_to_text(result) -> str:
+    """Best-effort extraction of the final assistant answer from a flow result."""
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (ValueError, TypeError):
+            return result.strip()
+    if isinstance(result, dict):
+        text = _extract_assistant_text(result.get("messages"))
+        if text:
+            return text
+        for key in ("raw", "output", "answer", "content", "result"):
+            val = result.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def _finalize_response(
+    channel_id, kickoff_id, final_text, call_id=None, seq=0, agent_role=""
+):
+    """Persist the final assistant message and tell the UI to render the
+    authoritative text. Deduped per kickoff so the realtime flow_finished and
+    the status watchdog can't both fire."""
+    with _kickoff_lock:
+        if kickoff_id and kickoff_id in _finalized_kickoffs:
+            return
+        if kickoff_id:
+            _finalized_kickoffs.add(kickoff_id)
+        if _pending_kickoffs.get(channel_id) == kickoff_id:
+            _pending_kickoffs.pop(channel_id, None)
+
+    _active_thinking.pop(channel_id, None)
+    _active_responses.pop(channel_id, None)
+
+    if final_text:
+        try:
+            db.add_message(
+                channel_id,
+                role="assistant",
+                content=final_text,
+                event_type="assistant_message",
+                event_id=f"result:{kickoff_id}",
+                agent_role=agent_role,
+            )
+        except Exception as e:
+            app.logger.warning("Failed to persist final message: %s", e)
+
+    _broadcast_to_channel(
+        channel_id,
+        {
+            "type": "flow_finished",
+            "seq": seq,
+            "text": final_text,
+            "call_id": call_id,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Status watchdog (fallback for dropped webhooks)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_status(kickoff_id):
+    try:
+        resp = http_requests.get(
+            f"{DEPLOYMENT_URL}/status/{kickoff_id}",
+            headers=_crewai_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        app.logger.warning("Status poll failed for %s: %s", kickoff_id, e)
+        return None
+
+
+def _status_watchdog(channel_id, kickoff_id):
+    """Fallback for dropped realtime webhooks: if no events arrive for
+    _IDLE_TIMEOUT seconds and the kickoff hasn't finished, poll AMP's status
+    endpoint and finalize from the authoritative result once it completes."""
+    started = time.monotonic()
+    while time.monotonic() - started < _WATCHDOG_MAX_LIFETIME:
+        time.sleep(2)
+
+        with _kickoff_lock:
+            still_pending = _pending_kickoffs.get(channel_id) == kickoff_id
+        if not still_pending:
+            return
+
+        idle = time.time() - _last_event_at.get(channel_id, started)
+        if idle < _IDLE_TIMEOUT:
+            continue
+
+        status = _fetch_status(kickoff_id)
+        if not status:
+            continue
+
+        state = str(status.get("state") or status.get("status") or "").upper()
+        if state in ("SUCCESS", "COMPLETED", "FINISHED", "SUCCEEDED"):
+            final_text = _result_to_text(status.get("result"))
+            ar = _active_responses.get(channel_id)
+            app.logger.info(
+                "Watchdog finalizing channel=%s kickoff=%s after %.1fs idle",
+                channel_id,
+                kickoff_id,
+                idle,
+            )
+            _finalize_response(
+                channel_id,
+                kickoff_id,
+                final_text,
+                call_id=ar.get("call_id") if ar else None,
+            )
+            return
+        if state in ("FAILED", "ERROR", "CANCELLED", "CANCELED", "NOT_FOUND"):
+            app.logger.warning(
+                "Watchdog: execution %s ended in state=%s", kickoff_id, state
+            )
+            _finalize_response(channel_id, kickoff_id, "")
+            return
+
+    app.logger.warning(
+        "Watchdog gave up on kickoff=%s after %ss", kickoff_id, _WATCHDOG_MAX_LIFETIME
+    )
+    with _kickoff_lock:
+        _pending_kickoffs.pop(channel_id, None)
 
 
 # ---------------------------------------------------------------------------

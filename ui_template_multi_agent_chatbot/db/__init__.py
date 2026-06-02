@@ -4,54 +4,73 @@ import uuid
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "chatbot.db")
 
+_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS channels (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        last_state_id TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_id TEXT NOT NULL REFERENCES channels(id),
+        role TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        event_type TEXT,
+        image_base64 TEXT,
+        timestamp TEXT DEFAULT (datetime('now')),
+        event_id TEXT UNIQUE,
+        agent_role TEXT,
+        thinking_content TEXT,
+        tools_used TEXT,
+        timeline TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_channel
+        ON messages(channel_id, timestamp);
+
+    CREATE INDEX IF NOT EXISTS idx_channels_conversation
+        ON channels(conversation_id);
+"""
+
+
+def _ensure_schema(conn):
+    """Create the schema if it's missing.
+
+    Runs on every connection so the app self-heals even if the database
+    file is removed or recreated empty while the server is running.
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='channels'"
+    ).fetchone()
+    if not exists:
+        conn.executescript(_SCHEMA)
+        conn.commit()
+
 
 def _get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    _ensure_schema(conn)
     return conn
 
 
 def init_db():
     conn = _get_conn()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS channels (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            conversation_id TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id TEXT NOT NULL REFERENCES channels(id),
-            role TEXT NOT NULL,
-            content TEXT NOT NULL DEFAULT '',
-            event_type TEXT,
-            image_base64 TEXT,
-            timestamp TEXT DEFAULT (datetime('now')),
-            event_id TEXT UNIQUE,
-            agent_role TEXT,
-            thinking_content TEXT,
-            tools_used TEXT,
-            timeline TEXT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_messages_channel
-            ON messages(channel_id, timestamp);
-
-        CREATE INDEX IF NOT EXISTS idx_channels_conversation
-            ON channels(conversation_id);
-    """)
-    for col, col_type in [
-        ("agent_role", "TEXT"),
-        ("thinking_content", "TEXT"),
-        ("tools_used", "TEXT"),
-        ("timeline", "TEXT"),
+    conn.executescript(_SCHEMA)
+    for table, col, col_type in [
+        ("channels", "last_state_id", "TEXT"),
+        ("messages", "agent_role", "TEXT"),
+        ("messages", "thinking_content", "TEXT"),
+        ("messages", "tools_used", "TEXT"),
+        ("messages", "timeline", "TEXT"),
     ]:
         try:
-            conn.execute(f"ALTER TABLE messages ADD COLUMN {col} {col_type}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
             conn.commit()
         except Exception:
             pass
@@ -115,6 +134,16 @@ def get_channel_by_conversation_id(conversation_id):
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def update_channel_state_id(channel_id, state_id):
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE channels SET last_state_id = ? WHERE id = ?",
+        (state_id, channel_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def add_message(

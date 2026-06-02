@@ -12,6 +12,7 @@
 
   const renderedEventIds = new Set();
   const activeStreams = new Map();
+  const closedCallIds = new Set();
 
   let thinkingCallId = null;
   let thinkingElement = null;
@@ -31,7 +32,6 @@
   const $messageForm      = document.getElementById("message-form");
   const $messageInput     = document.getElementById("message-input");
   const $btnNewChannel    = document.getElementById("btn-new-channel");
-  const $btnDeleteChannel = document.getElementById("btn-delete-channel");
   const $modalOverlay     = document.getElementById("modal-overlay");
   const $newChannelForm   = document.getElementById("new-channel-form");
   const $newChannelName   = document.getElementById("new-channel-name");
@@ -70,8 +70,16 @@
       const li = document.createElement("li");
       li.className = "channel-item" + (ch.id === activeChannelId ? " active" : "");
       li.dataset.id = ch.id;
-      li.innerHTML = '<span class="hash">#</span> ' + escapeHtml(ch.name);
+      li.innerHTML =
+        '<span class="hash">#</span>' +
+        '<span class="channel-name">' + escapeHtml(ch.name) + "</span>" +
+        '<button class="channel-delete" title="Delete conversation" aria-label="Delete conversation">' +
+        '<span class="trash-icon" aria-hidden="true"></span></button>';
       li.addEventListener("click", () => selectChannel(ch.id));
+      li.querySelector(".channel-delete").addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteChannel(ch.id);
+      });
       $channelList.appendChild(li);
     });
   }
@@ -104,6 +112,7 @@
     renderedEventIds.clear();
     activeStreams.forEach((s) => s.element?.remove());
     activeStreams.clear();
+    closedCallIds.clear();
     if (thinkingElement) thinkingElement.remove();
     thinkingCallId = null;
     thinkingElement = null;
@@ -133,6 +142,7 @@
     scrollToBottom();
     subscribeSSE(channelId);
     setTyping(false);
+    setExecuting(false);
     $messageInput.focus();
   }
 
@@ -177,13 +187,11 @@
       handleToolUsageFinished(data);
     } else if (data.type === "tool_usage_error") {
       handleToolUsageError(data);
-    } else if (data.type === "kickoff_started") {
+    } else if (data.type === "kickoff_started" || data.type === "flow_started") {
       setTyping(true);
       setExecuting(true);
     } else if (data.type === "flow_finished") {
-      finalizeAllStreams();
-      setTyping(false);
-      setExecuting(false);
+      handleFlowFinished(data);
     } else if (data.type === "kickoff_error") {
       finalizeAllStreams();
       setTyping(false);
@@ -300,10 +308,12 @@
   }
 
   function handleStreamChunk(data) {
-    const { call_id, chunk, tool_call, agent_role, response_id } = data;
+    const { call_id, chunk, tool_call, agent_role, seq } = data;
     if (!call_id || !chunk) return;
 
     if (tool_call) return;
+
+    if (closedCallIds.has(call_id)) return;
 
     const key = call_id;
     let stream = activeStreams.get(key);
@@ -320,10 +330,11 @@
       const contentEl = el.querySelector(".message-content");
       stream = {
         element: el, contentEl,
+        chunks: new Map(),
+        fallbackSeq: 0,
         contentBuffer: "",
         wordCount: 0,
         agentRole: agent_role, callId: call_id,
-        responseId: response_id,
         startTime: Date.now(),
       };
       activeStreams.set(key, stream);
@@ -332,7 +343,20 @@
     if (stream.structured) return;
 
     setTyping(false);
-    stream.contentBuffer += chunk;
+
+    const seqKey = (typeof seq === "number") ? seq : `f${stream.fallbackSeq++}`;
+    if (stream.chunks.has(seqKey)) return;
+    stream.chunks.set(seqKey, chunk);
+    stream.contentBuffer = [...stream.chunks.entries()]
+      .sort((a, b) => {
+        const na = typeof a[0] === "number", nb = typeof b[0] === "number";
+        if (na && nb) return a[0] - b[0];
+        if (na) return -1;
+        if (nb) return 1;
+        return 0;
+      })
+      .map((e) => e[1])
+      .join("");
 
     if (stream.contentEl && stream.contentBuffer) {
       stream.contentEl.innerHTML = marked.parse(stream.contentBuffer, { breaks: true });
@@ -511,6 +535,32 @@
     return div;
   }
 
+  function handleFlowFinished(data) {
+    if (data.call_id) closedCallIds.add(data.call_id);
+    if (data.text) applyFinalText(data.call_id, data.text);
+    finalizeAllStreams();
+    setTyping(false);
+    setExecuting(false);
+  }
+
+  function applyFinalText(callId, text) {
+    let stream = (callId && activeStreams.get(callId)) || null;
+    if (!stream) stream = activeStreams.values().next().value || null;
+
+    let contentEl;
+    if (stream && stream.contentEl) {
+      contentEl = stream.contentEl;
+    } else {
+      const el = createStreamingBubble("");
+      contentEl = el.querySelector(".message-content");
+    }
+
+    contentEl.innerHTML = marked.parse(text, { breaks: true });
+    contentEl.style.display = "";
+    contentEl.classList.remove("streaming", "cursor-active");
+    scrollToBottom();
+  }
+
   function finalizeAllStreams() {
     for (const [, stream] of activeStreams) {
       finalizeStream(stream);
@@ -555,6 +605,7 @@
         renderMessage(result.message);
         scrollToBottom();
       }
+      setTyping(true);
     } catch (err) {
       showError("Failed to send message");
     }
@@ -599,27 +650,26 @@
   // Delete channel
   // ---------------------------------------------------------------------------
 
-  $btnDeleteChannel.addEventListener("click", async () => {
-    if (!activeChannelId) return;
+  async function deleteChannel(channelId) {
     if (!confirm("Delete this channel and all its messages?")) return;
 
-    await api(`/api/channels/${activeChannelId}`, { method: "DELETE" });
-    activeChannelId = null;
-    if (eventSource) { eventSource.close(); eventSource = null; }
+    await api(`/api/channels/${channelId}`, { method: "DELETE" });
 
-    $chatView.classList.add("hidden");
-    $emptyState.classList.remove("hidden");
+    if (channelId === activeChannelId) {
+      activeChannelId = null;
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      $chatView.classList.add("hidden");
+      $emptyState.classList.remove("hidden");
+    }
     await loadChannels();
-  });
+  }
 
   // ---------------------------------------------------------------------------
   // AMP wakeup
   // ---------------------------------------------------------------------------
 
-  let wakeupPromise = null;
-
   function triggerWakeup() {
-    wakeupPromise = fetch("/api/wakeup", { method: "POST" })
+    fetch("/api/wakeup", { method: "POST" })
       .then((res) => res.json())
       .then((data) => {
         if (data.status === "waking") {
@@ -630,7 +680,6 @@
       .finally(() => {
         $wakeupOverlay.classList.add("fade-out");
         setTimeout(() => $wakeupOverlay.classList.add("hidden"), 400);
-        wakeupPromise = null;
       });
   }
 

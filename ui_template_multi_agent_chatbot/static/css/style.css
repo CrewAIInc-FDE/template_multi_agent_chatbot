@@ -156,6 +156,51 @@ html, body {
   font-weight: 500;
   flex-shrink: 0;
 }
+.channel-item .channel-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trash-icon {
+  display: inline-block;
+  width: 17px;
+  height: 17px;
+  background-color: currentColor;
+  -webkit-mask: url("/static/img/trash.svg") no-repeat center / contain;
+  mask: url("/static/img/trash.svg") no-repeat center / contain;
+}
+
+.channel-delete {
+  flex-shrink: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  padding: 0;
+  width: 20px;
+  height: 20px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color .12s, background .12s;
+}
+.channel-item:hover .channel-delete,
+.channel-item.active .channel-delete {
+  display: inline-flex;
+}
+.channel-delete:hover {
+  color: var(--danger);
+  background: rgba(218, 55, 60, .15);
+}
+.channel-delete .trash-icon {
+  width: 14px;
+  height: 14px;
+}
 
 /* ============================================================
    Main / Chat

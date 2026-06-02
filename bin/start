@@ -5,8 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 UI_DIR="$ROOT_DIR/ui_template_multi_agent_chatbot"
 
-NGROK_DOMAIN="crewai-chatbot.ngrok.io"
-PORT=5005
+# ── Load .env ─────────────────────────────────────────────────────────────────
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  set -a
+  source "$ROOT_DIR/.env"
+  set +a
+fi
+
+NGROK_DOMAIN="${NGROK_DOMAIN:-crewai-chatbot.ngrok.app}"
+PORT="${PORT:-5005}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,11 +35,6 @@ cleanup() {
   echo "Done."
 }
 trap cleanup EXIT INT TERM
-
-# ── Load .env ─────────────────────────────────────────────────────────────────
-set -a
-source "$ROOT_DIR/.env"
-set +a
 
 # ── Dependencies via uv ──────────────────────────────────────────────────────
 echo "Installing dependencies..."
@@ -60,7 +62,7 @@ echo "════════════════════════�
 echo "  Local:  http://localhost:$PORT"
 echo "  Public: https://$NGROK_DOMAIN"
 echo ""
-echo "  Webhook endpoint: https://$NGROK_DOMAIN/api/webhook"
+echo "  Webhook endpoint: https://$NGROK_DOMAIN/api/webhook/<channel_id>"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "Press Ctrl+C to stop."

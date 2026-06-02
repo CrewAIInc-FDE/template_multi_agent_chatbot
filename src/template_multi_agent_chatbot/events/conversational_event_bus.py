@@ -2,7 +2,6 @@ from typing import Callable
 
 from crewai.events.event_bus import crewai_event_bus
 
-from template_multi_agent_chatbot.events.listeners import ConversationalEventListener
 from template_multi_agent_chatbot.events.types import ImageGenerated
 from template_multi_agent_chatbot.types import Message
 
@@ -10,7 +9,6 @@ from template_multi_agent_chatbot.types import Message
 class ConversationalEventBus:
     def __init__(self, flow: object):
         self._flow = flow
-        ConversationalEventListener(id=flow.state.id)
 
     def append_message(self, message: Message):
         self._flow.state.messages.append(message)
