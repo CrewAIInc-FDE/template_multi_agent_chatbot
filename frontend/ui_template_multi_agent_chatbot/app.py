@@ -39,6 +39,26 @@ WEBHOOK_EVENTS = [
     "tool_usage_error",
 ]
 
+# AMP relays flow_finished for internal sub-flows too (notably the
+# "AgentExecutor" flow that wraps each agent run, whose result is just the
+# status string "completed"). Only this top-level flow carries the real
+# conversation result, so we finalize on it alone.
+TOP_LEVEL_FLOW_NAME = "ConversationalFlow"
+
+# Bare flow/agent status tokens that must never be rendered as an answer.
+_STATUS_TOKENS = {
+    "completed",
+    "success",
+    "succeeded",
+    "finished",
+    "failed",
+    "error",
+    "running",
+    "pending",
+    "cancelled",
+    "canceled",
+}
+
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 db.init_db()
@@ -515,9 +535,15 @@ def _handle_event(channel_id: str, ev: dict):
         )
 
     elif etype == "flow_finished":
+        # Ignore flow_finished from internal sub-flows (e.g. "AgentExecutor"):
+        # their result is the status string "completed", and finalizing on them
+        # both leaks "completed" into the chat and dedupes out the real answer.
+        if d.get("flow_name") != TOP_LEVEL_FLOW_NAME:
+            return
         ar = _active_responses.get(channel_id)
-        result = d.get("result") or {}
-        final_text = _result_to_text(result)
+        final_text = _result_to_text(d.get("result")) or _result_to_text(d.get("state"))
+        if not final_text and ar:
+            final_text = (ar.get("text") or "").strip()
         kickoff_id = _pending_kickoffs.get(channel_id) or execution_id or ""
         _finalize_response(
             channel_id,
@@ -549,7 +575,8 @@ def _result_to_text(result) -> str:
         try:
             result = json.loads(result)
         except (ValueError, TypeError):
-            return result.strip()
+            stripped = result.strip()
+            return "" if stripped.lower() in _STATUS_TOKENS else stripped
     if isinstance(result, dict):
         text = _extract_assistant_text(result.get("messages"))
         if text:
