@@ -97,7 +97,7 @@ The event system is the bridge between the CrewAI agent running in AMP and the e
 
 - Simple HTTP POST client that sends JSON event payloads to `DISPATCHER_URL` (webhook.site) with bearer auth.
 
-## UI (`ui_template_multi_agent_chatbot/`)
+## UI (`frontend/ui_template_multi_agent_chatbot/`)
 
 Flask app with a Discord-inspired dark theme.
 
@@ -136,4 +136,23 @@ Flask app with a Discord-inspired dark theme.
   ```
    This installs dependencies, wakes up AMP, starts Flask on port 5005, and opens an ngrok tunnel.
 5. Open `http://localhost:5005` (or `https://crewai-chatbot.ngrok.io`), create a channel, and start chatting.
+
+## Deploying the UI to Heroku
+
+The UI lives in `frontend/` as a self-contained app with its own `pyproject.toml` /
+`uv.lock` (Flask, gunicorn, requests, python-dotenv only — no CrewAI deps). The repo
+root stays reserved for the AMP flow, so Heroku must treat `frontend/` as the app root
+via a subdirectory buildpack:
+
+```bash
+heroku buildpacks:clear
+heroku buildpacks:set https://github.com/timanovsky/subdir-heroku-buildpack
+heroku buildpacks:add heroku/python
+heroku config:set PROJECT_PATH=frontend
+```
+
+Set the UI config vars (`WEBHOOK_TOKEN`, `DEPLOYMENT_URL`, `DEPLOYMENT_KEY`,
+`PUBLIC_BASE_URL`) on the Heroku app; `PORT` is injected automatically. The subdir
+buildpack promotes `frontend/` to the slug root before `heroku/python` runs, so only
+the UI dependencies are installed.
 

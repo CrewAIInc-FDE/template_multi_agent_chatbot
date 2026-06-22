@@ -3,12 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-UI_DIR="$ROOT_DIR/ui_template_multi_agent_chatbot"
+FRONTEND_DIR="$ROOT_DIR/frontend"
+UI_DIR="$FRONTEND_DIR/ui_template_multi_agent_chatbot"
 
 # ── Load .env ─────────────────────────────────────────────────────────────────
-if [[ -f "$ROOT_DIR/.env" ]]; then
+# bin/start only runs the Flask UI + ngrok (the crew runs on AMP), so we load the
+# frontend env file here. The UI's app.py also loads frontend/.env via load_dotenv.
+if [[ -f "$FRONTEND_DIR/.env" ]]; then
   set -a
-  source "$ROOT_DIR/.env"
+  source "$FRONTEND_DIR/.env"
   set +a
 fi
 
@@ -37,8 +40,10 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ── Dependencies via uv ──────────────────────────────────────────────────────
+# The UI is a standalone Flask app (it talks to the AMP deployment over HTTP),
+# so we only install the frontend's deps here — not the backend/crew packages.
 echo "Installing dependencies..."
-uv pip install -q -e "$ROOT_DIR" --python "$(which python3)"
+uv pip install -q -e "$FRONTEND_DIR" --python "$(which python3)"
 
 # ── Start Flask ──────────────────────────────────────────────────────────────
 echo "Starting Flask on port $PORT..."

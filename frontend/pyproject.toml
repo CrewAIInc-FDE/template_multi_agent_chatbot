@@ -1,0 +1,11 @@
+[project]
+name = "template_multi_agent_chatbot_ui"
+version = "0.1.0"
+description = "Flask web UI for the multi-agent chatbot (talks to the CrewAI AMP deployment over HTTP)"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "flask",
+    "gunicorn",
+    "requests>=2.32.5",
+    "python-dotenv",
+]
