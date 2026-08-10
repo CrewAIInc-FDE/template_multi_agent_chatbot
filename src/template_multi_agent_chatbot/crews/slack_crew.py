@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from crewai import LLM, Agent, Crew, Process, Task
@@ -9,31 +8,39 @@ from template_multi_agent_chatbot.platform_health import warn_if_unavailable
 
 _SLACK_SKILL_PATH = str(Path(__file__).resolve().parent.parent / "skills" / "slack")
 
-# Read-only Slack actions. Safe to run against a live workspace: they surface
-# information that the person chatting could already see.
-_READ_ACTIONS = [
+# Read-only Slack actions — the complete set this agent may use.
+#
+# The allowlist IS the safety boundary. `apps=["slack"]` would hand the agent all
+# 167 actions the integration exposes, including SLACK_ARCHIVE_CONVERSATION,
+# SLACK_DELETES_A_MESSAGE_FROM_A_CHAT, SLACK_SEND_MESSAGE and enterprise user
+# management. Naming actions individually is what keeps an assistant pointed at a
+# live workspace from being able to change it.
+#
+# Every name here is verified against the live /actions endpoint, NOT taken from
+# the integration docs — five of the seven names those docs list resolve to
+# nothing, and an unrecognised reference is dropped silently rather than raising.
+# Check any addition with `platform_health.unresolved_actions()` first, and keep
+# the list tight: tool-selection quality degrades as the list grows.
+READ_ONLY_ACTIONS = [
+    # Finding things
     "slack/search_messages",
-    "slack/list_channels",
-    "slack/list_members",
-    "slack/get_user_by_email",
-    "slack/get_users_by_name",
+    "slack/find_channels",
+    "slack/find_users",
+    "slack/list_all_channels",
+    # Reading conversations
+    "slack/fetch_conversation_history",
+    "slack/fetch_message_thread_from_a_conversation",
+    "slack/retrieve_conversation_information",
+    "slack/retrieve_conversation_members_list",
+    # People and citations
+    "slack/retrieve_detailed_user_information",
+    "slack/retrieve_message_permalink_url",
 ]
-
-# Writes post into a real workspace as the shared org account, so they are
-# opt-in. A demo that accidentally messages a live channel is worse than a demo
-# that can only read.
-_WRITE_ACTIONS = [
-    "slack/send_message",
-    "slack/send_direct_message",
-]
-
-
-def writes_enabled() -> bool:
-    return os.getenv("SLACK_ALLOW_WRITES", "").strip().lower() in {"1", "true", "yes"}
 
 
 def slack_apps() -> list[str]:
-    return _READ_ACTIONS + (_WRITE_ACTIONS if writes_enabled() else [])
+    """Actions this agent is permitted to use. Read-only, by construction."""
+    return list(READ_ONLY_ACTIONS)
 
 
 class SlackCrew:
@@ -47,26 +54,18 @@ class SlackCrew:
         # improvise an excuse.
         warn_if_unavailable(apps)
 
-        write_rules = (
-            """You MAY send messages, but only when the user clearly asks you to.
-Before sending, state exactly what you will post and where. Never send a message
-the user did not ask for."""
-            if writes_enabled()
-            else """You are READ-ONLY. You cannot send messages or DMs. If the user asks
-you to post something, explain that sending is disabled in this demo and offer
-to draft the message text for them to send themselves."""
-        )
-
         return Agent(
             role="Slack Workspace Assistant",
-            goal=f"""Help the user find and understand what is happening in their Slack
+            goal="""Help the user find and understand what is happening in their Slack
 workspace. Your text output is streamed live to the user in real time — write as if
 speaking directly to them.
 
 You search conversations, identify the right channels and people, and summarize
 discussions accurately. Before calling a tool, briefly state what you are about to do.
 
-{write_rules}""",
+You are READ-ONLY: you can search and read, but you cannot post, reply, react, pin,
+or change anything. If the user asks you to send a message, say plainly that you can
+only read Slack, then offer to draft the text for them to send themselves.""",
             backstory="""You are an expert at navigating busy Slack workspaces.
 
 You know that search works best with distinctive keywords rather than long sentences,

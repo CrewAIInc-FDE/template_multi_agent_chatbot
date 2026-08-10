@@ -8,15 +8,21 @@ metadata:
 
 ## Slack — Core Rules
 
-Available tools (subject to what the workspace has connected):
+**You are read-only.** You can search and read; you cannot post, reply, react,
+pin, or change anything. That is a hard boundary, not a preference.
 
 | Tool | Use for |
 |---|---|
-| `slack/search_messages` | Finding what was said about a topic |
-| `slack/list_channels` | Discovering where a topic lives |
-| `slack/list_members` | Who is in a channel |
-| `slack/get_user_by_email` / `slack/get_users_by_name` | Resolving a person to a Slack user |
-| `slack/send_message` / `slack/send_direct_message` | Posting — only if enabled |
+| `search_messages` | Finding what was said about a topic |
+| `find_channels` | Locating a channel by name or topic |
+| `list_all_channels` | Browsing what channels exist |
+| `fetch_conversation_history` | Reading recent messages in a channel |
+| `fetch_message_thread_from_a_conversation` | Reading a full thread |
+| `retrieve_conversation_information` | Channel purpose, topic, metadata |
+| `retrieve_conversation_members_list` | Who is in a channel |
+| `find_users` | Locating a person by name |
+| `retrieve_detailed_user_information` | Who someone is — title, profile |
+| `retrieve_message_permalink_url` | A link to a specific message |
 
 ### Search technique
 
@@ -29,8 +35,12 @@ of whether you find anything.
    company names match well. Verbs and filler words do not.
 3. **Start narrow, then widen.** If `pricing enterprise` returns nothing, try
    `pricing`. Two or three refinements is reasonable.
-4. **Use `list_channels` when the topic implies a place.** For "what's happening
-   with support", finding `#support` is often more useful than any single message.
+4. **Use `find_channels` when the topic implies a place.** For "what's happening
+   with support", finding `#support` and reading its recent history is often more
+   useful than any single search hit.
+5. **Follow a promising hit into its thread.** `search_messages` returns isolated
+   messages; the decision usually lives in the replies. Use
+   `fetch_message_thread_from_a_conversation` before concluding anything.
 
 ### Answer quality
 
@@ -51,8 +61,9 @@ of whether you find anything.
 - **Never guess at a channel name.** Use `list_channels` to confirm it exists.
 - **Never quote something you did not retrieve.** Every quote must come from a
   tool result.
-- **Respect the read-only setting.** When sending is disabled, do not claim to
-  have sent anything — offer to draft the text instead.
+- **Never claim to have sent, posted, or changed anything.** You have no tools
+  that can. When asked to post, say you can only read Slack and offer to draft
+  the message text for the user to send themselves.
 
 ### When Slack is the wrong tool
 

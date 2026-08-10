@@ -52,6 +52,52 @@ def action_counts(apps: list[str], timeout: int = 10) -> dict[str, int]:
     }
 
 
+def _expected_action_name(reference: str) -> str | None:
+    """`slack/search_messages` -> `SLACK_SEARCH_MESSAGES`."""
+    app, _, action = reference.partition("/")
+    return f"{app}_{action}".upper() if action else None
+
+
+def unresolved_actions(apps: list[str], timeout: int = 10) -> list[str]:
+    """Return the `app/action` references the platform does not recognise.
+
+    Worth checking whenever the allowlist changes: an unknown reference is
+    dropped without complaint, so a typo (or a name copied from the integration
+    docs, several of which are wrong) silently removes a capability. The agent
+    then reports it cannot do something it was configured to do.
+    """
+    token = os.getenv("CREWAI_PLATFORM_INTEGRATION_TOKEN", "").strip()
+    references = [app for app in apps if "/" in app]
+    if not token or not references:
+        return []
+
+    try:
+        response = requests.get(
+            f"{_base_url()}/actions",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"apps": ",".join(references)},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json().get("actions", {})
+    except Exception as exc:
+        logger.warning("Could not verify platform actions: %s", exc)
+        return []
+
+    resolved = {
+        action.get("name")
+        for actions in payload.values()
+        if isinstance(actions, list)
+        for action in actions
+        if isinstance(action, dict)
+    }
+    return [
+        reference
+        for reference in references
+        if _expected_action_name(reference) not in resolved
+    ]
+
+
 def warn_if_unavailable(apps: list[str]) -> None:
     """Log once per process when a Platform app resolves to no actions."""
     names = sorted({app.split("/")[0] for app in apps})
@@ -81,3 +127,10 @@ def warn_if_unavailable(apps: list[str]) -> None:
                 "dashboard, or the agent will silently be unable to use it.",
                 app,
             )
+
+    if unknown := unresolved_actions(apps):
+        logger.warning(
+            "These action references are not recognised and were dropped: %s. "
+            "The agent is missing those capabilities.",
+            ", ".join(unknown),
+        )

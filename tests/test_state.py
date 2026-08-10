@@ -63,28 +63,35 @@ def test_images_survive_a_serialization_round_trip():
 # ---------------------------------------------------------------------------
 
 
-def test_slack_is_read_only_by_default(monkeypatch):
-    """Writes post into a real workspace as the shared org account, so they must
-    not be reachable unless explicitly enabled."""
-    monkeypatch.delenv("SLACK_ALLOW_WRITES", raising=False)
+def test_slack_actions_are_read_only():
+    """The allowlist IS the safety boundary: apps=["slack"] would expose all 167
+    actions, including archiving conversations, deleting messages and enterprise
+    user management."""
     from template_multi_agent_chatbot.crews import slack_crew
 
     apps = slack_crew.slack_apps()
+    forbidden = (
+        "send", "post", "create", "update", "delete", "archive", "invite",
+        "remove", "add", "join", "leave", "rename", "upload", "pin", "set_",
+        "kick", "share", "schedule", "edit",
+    )
 
-    assert "slack/search_messages" in apps
-    assert "slack/send_message" not in apps
-    assert "slack/send_direct_message" not in apps
+    assert apps, "the agent must have at least one action"
+    for action in apps:
+        verb = action.split("/", 1)[1]
+        assert not verb.startswith(forbidden), f"{action} is not read-only"
 
 
-def test_slack_writes_can_be_enabled(monkeypatch):
-    monkeypatch.setenv("SLACK_ALLOW_WRITES", "true")
+def test_slack_never_requests_a_whole_app():
+    """A bare 'slack' reference would pull in every action, writes included."""
     from template_multi_agent_chatbot.crews import slack_crew
 
-    assert "slack/send_message" in slack_crew.slack_apps()
+    assert all("/" in action for action in slack_crew.slack_apps())
 
 
-def test_slack_write_flag_ignores_ambiguous_values(monkeypatch):
-    monkeypatch.setenv("SLACK_ALLOW_WRITES", "maybe")
+def test_slack_allowlist_is_not_mutated_by_callers():
     from template_multi_agent_chatbot.crews import slack_crew
+
+    slack_crew.slack_apps().append("slack/send_message")
 
     assert "slack/send_message" not in slack_crew.slack_apps()
