@@ -173,3 +173,123 @@ def test_missing_deployment_config_names_the_variables(monkeypatch):
     assert response.status_code == 503
     error = response.get_json()["error"]
     assert "DEPLOYMENT_URL" in error and "DEPLOYMENT_KEY" in error
+
+
+# ---------------------------------------------------------------------------
+# Google SSO
+# ---------------------------------------------------------------------------
+
+GOOGLE_ENV = {
+    "GOOGLE_CLIENT_ID": "client-id",
+    "GOOGLE_CLIENT_SECRET": "client-secret",
+    "ALLOWED_EMAIL_DOMAINS": "crewai.com",
+    "PUBLIC_BASE_URL": "https://demo.example",
+    "APP_PASSWORD": None,
+}
+
+
+@pytest.fixture
+def sso(monkeypatch):
+    """App with Google SSO configured instead of a shared password."""
+    import auth as auth_module
+
+    for key, value in GOOGLE_ENV.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    importlib.reload(auth_module)
+    module = _load_app(monkeypatch, **GOOGLE_ENV)
+    return module
+
+
+def test_sso_takes_precedence_over_the_password_form(sso):
+    body = sso.app.test_client().get("/login").get_data(as_text=True)
+
+    assert "Continue with Google" in body
+    assert 'type="password"' not in body
+
+
+def test_login_redirects_to_google_with_state(sso):
+    client = sso.app.test_client()
+
+    response = client.get("/auth/google")
+
+    assert response.status_code == 302
+    location = response.headers["Location"]
+    assert location.startswith("https://accounts.google.com/o/oauth2/v2/auth")
+    assert "client_id=client-id" in location
+    assert "state=" in location
+    assert "hd=crewai.com" in location
+
+
+def test_callback_rejects_a_mismatched_state(sso):
+    """Without this an attacker could feed a victim's browser their own code."""
+    client = sso.app.test_client()
+    client.get("/auth/google")
+
+    response = client.get("/auth/google/callback?code=abc&state=not-the-state")
+
+    assert response.status_code == 400
+    assert client.get("/api/channels").status_code == 401
+
+
+def _complete_google_flow(sso, monkeypatch, userinfo):
+    import auth as auth_module
+
+    monkeypatch.setattr(
+        auth_module, "exchange_code", lambda code, uri: {"access_token": "tok"}
+    )
+    monkeypatch.setattr(auth_module, "fetch_userinfo", lambda token: userinfo)
+
+    client = sso.app.test_client()
+    state = client.get("/auth/google").headers["Location"].split("state=")[1].split("&")[0]
+    response = client.get(f"/auth/google/callback?code=abc&state={state}")
+    return client, response
+
+
+def test_allowed_domain_signs_in(sso, monkeypatch):
+    client, response = _complete_google_flow(
+        sso,
+        monkeypatch,
+        {"sub": "1", "email": "tom@crewai.com", "email_verified": True, "name": "Tom"},
+    )
+
+    assert response.status_code == 302
+    assert client.get("/api/channels").status_code == 200
+    assert client.get("/api/me").get_json()["email"] == "tom@crewai.com"
+
+
+def test_other_domains_are_rejected(sso, monkeypatch):
+    client, response = _complete_google_flow(
+        sso,
+        monkeypatch,
+        {"sub": "2", "email": "someone@gmail.com", "email_verified": True},
+    )
+
+    assert response.status_code == 401
+    assert client.get("/api/channels").status_code == 401
+
+
+def test_unverified_email_is_rejected(sso, monkeypatch):
+    """An unverified address can be set to anything, which would make the domain
+    check meaningless."""
+    client, response = _complete_google_flow(
+        sso,
+        monkeypatch,
+        {"sub": "3", "email": "tom@crewai.com", "email_verified": False},
+    )
+
+    assert response.status_code == 401
+    assert client.get("/api/channels").status_code == 401
+
+
+def test_identity_is_keyed_on_google_subject_not_email(sso, monkeypatch):
+    """Integration tokens will hang off this key, so it must survive a rename."""
+    client, _ = _complete_google_flow(
+        sso,
+        monkeypatch,
+        {"sub": "stable-123", "email": "tom@crewai.com", "email_verified": True},
+    )
+
+    assert client.get("/api/me").get_json()["user_id"] == "stable-123"

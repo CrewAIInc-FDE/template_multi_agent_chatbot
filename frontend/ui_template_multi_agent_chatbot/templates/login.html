@@ -9,26 +9,41 @@
 </head>
 <body>
   <div class="login-page">
-    <form class="login-card" method="POST" autocomplete="off">
+    <div class="login-card">
       <img src="/static/img/crewai-logo.svg" alt="CrewAI" class="login-logo">
       <h1 class="login-title">CrewAI Chat</h1>
-      <p class="login-subtitle">Enter the shared demo password to continue.</p>
 
-      <input
-        type="password"
-        name="password"
-        class="login-input"
-        placeholder="Password"
-        aria-label="Password"
-        autofocus
-        required>
+      {% if google_login_url %}
+        <p class="login-subtitle">
+          {% if allowed_domains %}
+            Sign in with your {{ allowed_domains | join(' or ') }} Google account.
+          {% else %}
+            Sign in with Google to continue.
+          {% endif %}
+        </p>
 
-      {% if error %}
-      <p class="login-error">{{ error }}</p>
+        {% if error %}<p class="login-error">{{ error }}</p>{% endif %}
+
+        <a class="login-button" href="{{ google_login_url }}">Continue with Google</a>
+      {% else %}
+        <p class="login-subtitle">Enter the shared demo password to continue.</p>
+
+        <form method="POST" autocomplete="off" class="login-form">
+          <input
+            type="password"
+            name="password"
+            class="login-input"
+            placeholder="Password"
+            aria-label="Password"
+            autofocus
+            required>
+
+          {% if error %}<p class="login-error">{{ error }}</p>{% endif %}
+
+          <button type="submit" class="login-button">Sign in</button>
+        </form>
       {% endif %}
-
-      <button type="submit" class="login-button">Sign in</button>
-    </form>
+    </div>
   </div>
 </body>
 </html>

@@ -91,6 +91,61 @@ The cost is two credential models to explain. Keep it manageable by putting ever
 requirement in `ROUTE_REQUIREMENTS` so the roster reflects what's actually wired
 up, whichever mechanism provided it.
 
+## Per-user integrations
+
+Goal: an agent acts as **the person chatting**, not as one shared service
+account. What follows is what the platform actually supports, verified against
+the 1.15.14 source and the platform docs — the docs alone are misleading here.
+
+### What exists
+
+`crewai.context` carries a `_platform_integration_token` ContextVar with
+`set_platform_integration_token()` and a `platform_context()` manager.
+`get_platform_integration_token()` reads the ContextVar **first**, then falls
+back to `CREWAI_PLATFORM_INTEGRATION_TOKEN`, and the value is captured in
+`ExecutionContext` so it survives the flow's thread hops. Set it per turn and
+everything downstream uses that user's token.
+
+| Path | Honours the ContextVar? |
+|---|---|
+| `mcps=` (connected slugs, via `PlusAPI`) | ✅ |
+| Skills registry | ✅ |
+| `apps=` (Platform actions) | ❌ — `crewai_tools` reads the env var only |
+
+`crewai_tools` defines its *own* `get_platform_integration_token()` that reads
+`os.getenv`, carrying a literal `# TODO: Use context manager to get token`.
+Closing that gap needs a shim, and it must patch the two **consuming** modules
+(`crewai_platform_tool_builder`, `crewai_platform_action_tool`) — they bind the
+symbol from `misc` at import, so patching `misc` alone does nothing.
+
+### What does not exist
+
+**CrewAI exposes no OAuth authorization-code flow to third-party apps.** Access
+tokens are `client_credentials` only and explicitly "not tying those credentials
+to a human user"; service accounts are org-scoped with no impersonation or
+delegation. The Slack integration page is explicit: one workspace connection,
+one enterprise token, every agent action from the same account.
+
+The `user_bearer_token` wording in the platform docs — *"scope authentication to
+the requesting user"* — describes AMP's own surfaces, where the platform already
+knows who is signed in. It is not reachable from an external app like this one.
+
+### The model we use
+
+1. **Google SSO** establishes per-user identity (`sub`, not email, so a rename
+   doesn't orphan tokens).
+2. **Google integrations** (Gmail, Calendar, Drive) come from *incremental
+   scopes on the same OAuth client* — no second OAuth app.
+3. **Slack** gets its own OAuth app, giving genuine per-user Slack tokens.
+4. **Everything else** (HubSpot, Notion, Jira, Zendesk…) stays on CrewAI `apps=`
+   at org level, so we don't own an OAuth app per vendor.
+
+> **Never put user tokens in kickoff inputs.** `Flow` merges non-`id` inputs into
+> state, `@persist` writes state to disk, and state is deep-copied into every
+> trace event — tokens would land in SQLite *and* Arize. Pass a `user_id`; have
+> the flow fetch that user's tokens from a UI endpoint at turn start
+> (authenticated with `WEBHOOK_TOKEN`) and hold them in memory only.
+
 ## Auto-route with explicit override
 
 Default is the LLM router. The user can override by naming an agent — useful on a

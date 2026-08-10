@@ -12,6 +12,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+import auth
 import db
 import requests as http_requests
 from dotenv import load_dotenv
@@ -123,11 +124,24 @@ db.init_db()
 # Reachable without a session. The webhook is the important one: AMP calls it
 # with a bearer token and has no cookie, so gating it would silently break every
 # reply. It authenticates via WEBHOOK_TOKEN instead (see webhook()).
-_PUBLIC_ENDPOINTS = {"login", "webhook", "webhook_preflight", "static"}
+_PUBLIC_ENDPOINTS = {
+    "login",
+    "google_login",
+    "google_callback",
+    "webhook",
+    "webhook_preflight",
+    "static",
+}
 
 
 def _auth_enabled() -> bool:
-    return bool(APP_PASSWORD)
+    """Auth ladder: Google SSO if configured, else shared password, else open.
+
+    The ladder exists so a fresh clone runs with no setup, a quick internal
+    deploy needs only a password, and the full per-user identity is available
+    without a second code path.
+    """
+    return auth.is_configured() or bool(APP_PASSWORD)
 
 
 def _is_authenticated() -> bool:
@@ -144,10 +158,76 @@ def _require_login():
     return redirect(url_for("login", next=request.path))
 
 
+def _redirect_uri() -> str:
+    """Callback Google returns to. Must match the Console entry exactly."""
+    base = PUBLIC_BASE_URL or request.url_root.rstrip("/")
+    return f"{base}/auth/google/callback"
+
+
+def _safe_next(target: str | None) -> str:
+    """Only ever redirect within this app — an absolute URL here would make the
+    ?next= parameter an open redirect."""
+    if target and target.startswith("/") and not target.startswith("//"):
+        return target
+    return url_for("index")
+
+
+@app.route("/auth/google")
+def google_login():
+    state = auth.new_state()
+    session["oauth_state"] = state
+    session["oauth_next"] = _safe_next(request.args.get("next"))
+    return redirect(auth.authorization_url(_redirect_uri(), state))
+
+
+@app.route("/auth/google/callback")
+def google_callback():
+    # Compare against the state we issued: without this, an attacker could feed
+    # a victim's browser their own authorization code.
+    expected = session.pop("oauth_state", None)
+    if not expected or request.args.get("state") != expected:
+        return render_template("login.html", error="Sign-in expired. Try again."), 400
+
+    if error := request.args.get("error"):
+        return render_template("login.html", error=f"Google reported: {error}"), 400
+
+    code = request.args.get("code")
+    if not code:
+        return render_template("login.html", error="No authorization code."), 400
+
+    try:
+        tokens = auth.exchange_code(code, _redirect_uri())
+        identity = auth.verify_user(auth.fetch_userinfo(tokens["access_token"]))
+    except auth.AuthError as exc:
+        app.logger.warning("Google sign-in rejected: %s", exc)
+        return render_template("login.html", error=str(exc)), 401
+
+    session["authenticated"] = True
+    session["user"] = identity
+    session.permanent = True
+    app.logger.info("Signed in: %s", identity["email"])
+
+    return redirect(session.pop("oauth_next", None) or url_for("index"))
+
+
+@app.route("/api/me")
+def me():
+    return jsonify(session.get("user") or {"email": None})
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if not _auth_enabled() or _is_authenticated():
         return redirect(url_for("index"))
+
+    # SSO takes precedence: with a Google client configured there is no password
+    # to type, so send the browser straight to Google.
+    if auth.is_configured():
+        return render_template(
+            "login.html",
+            google_login_url=url_for("google_login", next=request.args.get("next")),
+            allowed_domains=auth.ALLOWED_EMAIL_DOMAINS,
+        )
 
     error = None
     if request.method == "POST":
@@ -156,12 +236,7 @@ def login():
         if hmac.compare_digest(supplied, APP_PASSWORD):
             session["authenticated"] = True
             session.permanent = True
-            target = request.args.get("next") or url_for("index")
-            # Only ever redirect within this app — an attacker-supplied absolute
-            # URL in ?next= would otherwise make this an open redirect.
-            if not target.startswith("/") or target.startswith("//"):
-                target = url_for("index")
-            return redirect(target)
+            return redirect(_safe_next(request.args.get("next")))
         error = "Incorrect password."
         app.logger.warning("Failed login attempt from %s", request.remote_addr)
 

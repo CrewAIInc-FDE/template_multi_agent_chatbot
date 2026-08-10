@@ -971,3 +971,17 @@ html, body {
   color: var(--danger);
   text-align: center;
 }
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+}
+
+/* The Google path renders an <a>, the password path a <button>. */
+a.login-button {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+}
