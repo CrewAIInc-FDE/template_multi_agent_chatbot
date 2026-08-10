@@ -19,6 +19,15 @@ run_crew = "template_multi_agent_chatbot.main:kickoff"
 plot = "template_multi_agent_chatbot.main:plot"
 chat = "template_multi_agent_chatbot.main:chat"
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The suite imports the Flask UI too, which lives outside the backend package.
+pythonpath = ["src", "frontend/ui_template_multi_agent_chatbot"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

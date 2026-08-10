@@ -1,10 +1,13 @@
+import hmac
 import json
 import logging
 import os
 import queue
+import secrets
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -12,7 +15,16 @@ sys.path.insert(0, os.path.dirname(__file__))
 import db
 import requests as http_requests
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, render_template, request
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 logging.basicConfig(
@@ -26,6 +38,25 @@ DEPLOYMENT_URL = os.environ.get("DEPLOYMENT_URL", "").strip().rstrip("/")
 DEPLOYMENT_KEY = os.environ.get("DEPLOYMENT_KEY", "").strip()
 WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "").strip()
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+# Shared password for the whole UI. Unset means no gate: a fresh clone should run
+# locally without ceremony, but anything reachable from the internet must set it —
+# every message spends real API budget.
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
+
+# Signs the session cookie. Derived from APP_PASSWORD when unset so logins survive
+# a dyno restart; a random per-boot key would silently log everyone out instead.
+SECRET_KEY = (
+    os.environ.get("SECRET_KEY", "").strip()
+    or (f"derived-from-app-password:{APP_PASSWORD}" if APP_PASSWORD else "")
+    or secrets.token_urlsafe(32)
+)
+
+# Per-session send limits. In-process on purpose: the deployment runs a single
+# worker, so a shared store would be complexity without benefit.
+RATE_LIMIT_MESSAGES = int(os.environ.get("RATE_LIMIT_MESSAGES", "30"))
+RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "600"))
+DAILY_MESSAGE_CAP = int(os.environ.get("DAILY_MESSAGE_CAP", "500"))
 
 
 def _missing_config() -> list[str]:
@@ -82,7 +113,123 @@ _STATUS_TOKENS = {
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+app.secret_key = SECRET_KEY
 db.init_db()
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+# Reachable without a session. The webhook is the important one: AMP calls it
+# with a bearer token and has no cookie, so gating it would silently break every
+# reply. It authenticates via WEBHOOK_TOKEN instead (see webhook()).
+_PUBLIC_ENDPOINTS = {"login", "webhook", "webhook_preflight", "static"}
+
+
+def _auth_enabled() -> bool:
+    return bool(APP_PASSWORD)
+
+
+def _is_authenticated() -> bool:
+    return not _auth_enabled() or session.get("authenticated") is True
+
+
+@app.before_request
+def _require_login():
+    if request.endpoint in _PUBLIC_ENDPOINTS or _is_authenticated():
+        return None
+    # API callers get JSON they can render; browsers get the login page.
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Not signed in."}), 401
+    return redirect(url_for("login", next=request.path))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not _auth_enabled() or _is_authenticated():
+        return redirect(url_for("index"))
+
+    error = None
+    if request.method == "POST":
+        supplied = (request.form.get("password") or "").strip()
+        # compare_digest: don't leak the password through response timing.
+        if hmac.compare_digest(supplied, APP_PASSWORD):
+            session["authenticated"] = True
+            session.permanent = True
+            target = request.args.get("next") or url_for("index")
+            # Only ever redirect within this app — an attacker-supplied absolute
+            # URL in ?next= would otherwise make this an open redirect.
+            if not target.startswith("/") or target.startswith("//"):
+                target = url_for("index")
+            return redirect(target)
+        error = "Incorrect password."
+        app.logger.warning("Failed login attempt from %s", request.remote_addr)
+
+    return render_template("login.html", error=error), (401 if error else 200)
+
+
+@app.route("/logout", methods=["POST", "GET"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+_send_times: dict[str, deque] = {}
+_daily_count = {"day": None, "count": 0}
+_rate_lock = threading.Lock()
+
+
+def _rate_limit_error() -> str | None:
+    """Return an error message when this caller has sent too much, else None.
+
+    Two independent limits: a per-session sliding window (one person hammering
+    the box) and a process-wide daily cap (the whole demo running away). Both are
+    about protecting the API budget, not security.
+    """
+    now = time.time()
+    today = time.strftime("%Y-%m-%d", time.gmtime(now))
+
+    if "rate_id" not in session:
+        session["rate_id"] = secrets.token_urlsafe(8)
+    caller = session["rate_id"]
+
+    with _rate_lock:
+        if _daily_count["day"] != today:
+            _daily_count.update(day=today, count=0)
+        if DAILY_MESSAGE_CAP and _daily_count["count"] >= DAILY_MESSAGE_CAP:
+            return (
+                f"Daily limit reached ({DAILY_MESSAGE_CAP} messages). "
+                "This protects the shared API budget — try again tomorrow, or "
+                "raise DAILY_MESSAGE_CAP."
+            )
+
+        history = _send_times.setdefault(caller, deque())
+        while history and now - history[0] > RATE_LIMIT_WINDOW:
+            history.popleft()
+
+        if RATE_LIMIT_MESSAGES and len(history) >= RATE_LIMIT_MESSAGES:
+            retry_in = int(RATE_LIMIT_WINDOW - (now - history[0])) + 1
+            return (
+                f"Rate limit reached ({RATE_LIMIT_MESSAGES} messages per "
+                f"{RATE_LIMIT_WINDOW // 60} min). Try again in {retry_in}s."
+            )
+
+        history.append(now)
+        _daily_count["count"] += 1
+
+    return None
+
+
+if not _auth_enabled():
+    app.logger.warning(
+        "APP_PASSWORD is not set — the UI is UNAUTHENTICATED. Fine locally; set "
+        "it before exposing this anywhere, or anyone with the URL can spend your "
+        "API budget."
+    )
 
 if _missing_config():
     app.logger.warning(
@@ -241,6 +388,10 @@ def send_message(channel_id):
     content = data.get("content", "").strip()
     if not content:
         return jsonify({"error": "content is required"}), 400
+
+    rate_error = _rate_limit_error()
+    if rate_error:
+        return jsonify({"error": rate_error}), 429
 
     missing = _missing_config()
     if missing:
