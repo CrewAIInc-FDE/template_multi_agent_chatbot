@@ -60,10 +60,16 @@ def test_router_config_never_passes_an_empty_route_list(monkeypatch):
     be non-empty: CrewAI treats an empty list as "infer the catalog from @listen
     labels", which would resurrect every route the credential check just removed.
     """
-    all_credentials_absent = dict.fromkeys(
-        [*MONGO_ENV, "SERPER_API_KEY", "GEMINI_API_KEY"]
-    )
-    rc = _reload_routing(monkeypatch, all_credentials_absent)
+    import template_multi_agent_chatbot.routing.router_config as router_config
+
+    # Derived, not hardcoded: a new route adding a new credential would otherwise
+    # leave this test quietly passing against a stale list.
+    every_credential = {
+        variable
+        for requirements in router_config.ROUTE_REQUIREMENTS.values()
+        for variable in requirements
+    }
+    rc = _reload_routing(monkeypatch, dict.fromkeys(every_credential))
 
     assert rc.ROUTES == ()
     assert rc.ROUTER_CONFIG.routes == ("converse",)
@@ -83,3 +89,18 @@ def test_system_prompt_lists_only_enabled_capabilities(monkeypatch):
 def test_unroutable_turns_fall_back_to_converse(monkeypatch, field):
     rc = _reload_routing(monkeypatch, dict.fromkeys(MONGO_ENV))
     assert getattr(rc.ROUTER_CONFIG, field) == "converse"
+
+
+SLACK_ENV = {"CREWAI_PLATFORM_INTEGRATION_TOKEN": "platform-token"}
+
+
+def test_slack_route_requires_the_platform_token(monkeypatch):
+    rc = _reload_routing(monkeypatch, {**dict.fromkeys(MONGO_ENV), **dict.fromkeys(SLACK_ENV)})
+    assert "SLACK" not in rc.ROUTES
+
+
+def test_slack_route_enabled_with_the_platform_token(monkeypatch):
+    rc = _reload_routing(monkeypatch, {**dict.fromkeys(MONGO_ENV), **SLACK_ENV})
+    assert "SLACK" in rc.ROUTES
+    allowed = set(typing.get_args(rc.ConversationRoute.model_fields["intent"].annotation))
+    assert "SLACK" in allowed

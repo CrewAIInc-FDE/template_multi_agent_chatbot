@@ -73,6 +73,11 @@ ROUTE_DESCRIPTIONS = {
         "Any question about the CrewAI framework itself — agents, tasks, crews, "
         "flows, tools, deployment, or how to build with it."
     ),
+    "SLACK": (
+        "Anything about the team's Slack workspace: what was said or decided in "
+        "a channel, finding a conversation or thread, who is in a channel, or "
+        "who to ask about a topic."
+    ),
 }
 
 # Each route needs a backing service. Without one, the handler dies mid-turn on
@@ -88,6 +93,9 @@ ROUTE_REQUIREMENTS = {
         "MONGODB_DATABASE_NAME",
         "MONGODB_COLLECTION_NAME",
     ),
+    # Presence of the token only proves we can call the Platform API — whether
+    # Slack is actually connected is checked at run time by platform_health.
+    "SLACK": ("CREWAI_PLATFORM_INTEGRATION_TOKEN",),
 }
 
 

@@ -22,6 +22,10 @@ sys.path.insert(0, str(FRONTEND_DIR))
 _REQUIRED = {
     "GEMINI_API_KEY": "test-key",
     "SERPER_API_KEY": "test-key",
+    # Enables the SLACK route. The catalog is built when routing/router_config is
+    # imported, so a route's credentials must be present before that — setting
+    # them inside a test is too late.
+    "CREWAI_PLATFORM_INTEGRATION_TOKEN": "test-token",
     "ARIZE_API_KEY": "test-key",
     "ARIZE_PROJECT_NAME": "test",
     "ARIZE_SPACE_ID": "test",

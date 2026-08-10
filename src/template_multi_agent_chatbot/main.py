@@ -13,6 +13,7 @@ from template_multi_agent_chatbot.crews import (
     CrewaiDocsCrew,
     ImageCreationCrew,
     InternetSearchCrew,
+    SlackCrew,
 )
 from template_multi_agent_chatbot.events import ConversationalEventBus
 from template_multi_agent_chatbot.routing import (
@@ -129,6 +130,13 @@ class ConversationalFlow(Flow[ChatbotState]):
             event_bus=self.event_bus,
             source=self.handle_image_creation,
         ).execute()
+        self.append_assistant_message(reply)
+        return reply
+
+    @listen("SLACK")
+    def handle_slack(self) -> str:
+        """Search the team's Slack workspace: conversations, channels, people."""
+        reply = SlackCrew(messages=self.conversation_messages).execute()
         self.append_assistant_message(reply)
         return reply
 

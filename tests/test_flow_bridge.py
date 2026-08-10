@@ -47,7 +47,12 @@ def stub_crews(monkeypatch, flow_module):
         def execute(self):
             return "crew reply"
 
-    for name in ("ImageCreationCrew", "InternetSearchCrew", "CrewaiDocsCrew"):
+    for name in (
+        "ImageCreationCrew",
+        "InternetSearchCrew",
+        "CrewaiDocsCrew",
+        "SlackCrew",
+    ):
         monkeypatch.setattr(flow_module, name, StubCrew, raising=False)
     return StubCrew
 
@@ -154,3 +159,16 @@ def test_router_context_is_bounded(flow_module, stub_llm, stub_crews):
 
     assert len(context["message_history"]) <= flow_module.ROUTER_HISTORY_WINDOW
     assert "events" not in context
+
+
+def test_slack_route_dispatches_to_its_handler(flow_module, stub_llm, stub_crews):
+    """A new route is three edits; this pins that the third one actually wired up."""
+    stub_llm["value"] = "SLACK"
+    flow = flow_module.ConversationalFlow()
+
+    result = flow.kickoff(
+        inputs={"id": _session_id(), "user_message": "what did the team say about pricing?"}
+    )
+
+    assert flow.state.last_intent == "SLACK"
+    assert result == "crew reply"
