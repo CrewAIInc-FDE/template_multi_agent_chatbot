@@ -22,10 +22,29 @@ logging.basicConfig(
 dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path)
 
-DEPLOYMENT_URL = os.environ["DEPLOYMENT_URL"]
-DEPLOYMENT_KEY = os.environ["DEPLOYMENT_KEY"]
-WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]
+DEPLOYMENT_URL = os.environ.get("DEPLOYMENT_URL", "").strip().rstrip("/")
+DEPLOYMENT_KEY = os.environ.get("DEPLOYMENT_KEY", "").strip()
+WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "").strip()
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+
+def _missing_config() -> list[str]:
+    """Required settings that are absent or blank.
+
+    These can only be filled in after the flow is deployed, so a fresh clone
+    always starts without them. Reported up front and again on send: an empty
+    DEPLOYMENT_URL otherwise surfaces as `Invalid URL '/kickoff'`, which gives
+    no hint that the real problem is unset configuration.
+    """
+    return [
+        name
+        for name, value in (
+            ("DEPLOYMENT_URL", DEPLOYMENT_URL),
+            ("DEPLOYMENT_KEY", DEPLOYMENT_KEY),
+            ("WEBHOOK_TOKEN", WEBHOOK_TOKEN),
+        )
+        if not value
+    ]
 
 # Events AMP relays via webhook. llm_thinking_chunk, image_generated and the
 # conversation_* events are intentionally omitted here: the flow pushes those
@@ -64,6 +83,14 @@ _STATUS_TOKENS = {
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 db.init_db()
+
+if _missing_config():
+    app.logger.warning(
+        "Not connected to CrewAI AMP — %s not set in frontend/.env. "
+        "The UI will start and channels will work, but sending a message will "
+        "fail until the flow is deployed and these are filled in.",
+        ", ".join(_missing_config()),
+    )
 
 
 def _public_base_url() -> str:
@@ -214,6 +241,19 @@ def send_message(channel_id):
     content = data.get("content", "").strip()
     if not content:
         return jsonify({"error": "content is required"}), 400
+
+    missing = _missing_config()
+    if missing:
+        return jsonify(
+            {
+                "error": (
+                    f"Not connected to CrewAI AMP — {', '.join(missing)} "
+                    "not set in frontend/.env. Deploy the flow first "
+                    "(crewai deploy push), then copy the deployment URL and "
+                    "bearer token from the AMP dashboard."
+                )
+            }
+        ), 503
 
     msg = db.add_message(channel_id, role="user", content=content)
 

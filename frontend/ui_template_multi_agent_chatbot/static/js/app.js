@@ -625,6 +625,12 @@
         method: "POST",
         body: JSON.stringify({ content }),
       });
+      // api() resolves on non-2xx too, so an error body has to be checked
+      // explicitly — otherwise the typing indicator spins forever.
+      if (result && result.error) {
+        showError(result.error);
+        return;
+      }
       if (result && result.message) {
         renderMessage(result.message);
         scrollToBottom();
