@@ -1,5 +1,5 @@
 import base64
-from datetime import datetime
+import io
 from typing import Any, ClassVar, Type
 
 from crewai.tools import BaseTool
@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from template_multi_agent_chatbot.events.conversational_event_bus import (
     ConversationalEventBus,
 )
-from template_multi_agent_chatbot.types import Message
 
 
 class NanoBananaImageEditingToolInput(BaseModel):
@@ -18,9 +17,9 @@ class NanoBananaImageEditingToolInput(BaseModel):
         ...,
         description="Instructions describing how to edit the image (e.g. 'add sunglasses', 'change background to a beach').",
     )
-    image_path: str = Field(
+    image_reference: str = Field(
         ...,
-        description="Path to the source image to edit (e.g. '/tmp/140110.png').",
+        description="Reference of the image to edit, as returned by the generation tool (e.g. 'image#1').",
     )
 
 
@@ -29,8 +28,9 @@ class NanoBananaImageEditingTool(BaseTool):
 
     name: str = "Nano Banana Image Editing"
     description: str = (
-        "Edit an existing image through Nano Banana based on a text prompt. "
-        "Provide the path to the source image and a description of the desired edits."
+        "Edit an image generated earlier in this conversation. Provide the image "
+        "reference (e.g. 'image#1') and a description of the desired edits. "
+        "Returns a new reference for the edited image."
     )
     args_schema: Type[BaseModel] = NanoBananaImageEditingToolInput
 
@@ -39,37 +39,41 @@ class NanoBananaImageEditingTool(BaseTool):
 
     client: ClassVar[genai.Client] = genai.Client()
 
-    def _run(self, prompt: str, image_path: str) -> dict:
-        try:
-            source_image = Image.open(image_path)
-        except FileNotFoundError:
-            return {"output": f"Source image not found at '{image_path}'."}
+    def _run(self, prompt: str, image_reference: str) -> dict:
+        stored = self.event_bus.get_image(image_reference.strip())
+        if stored is None:
+            return {
+                "output": (
+                    f"No image found for '{image_reference}'. Check the conversation "
+                    "for a reference like 'image#1', or generate a new image first."
+                )
+            }
+
+        source_image = Image.open(io.BytesIO(base64.b64decode(stored)))
 
         response = self.client.models.generate_content(
             model="gemini-3.1-flash-image",
             contents=[prompt, source_image],
         )
-        filename = datetime.now().strftime("%H%M%S")
 
+        # Scan every part: the model routinely emits a text part before the image
+        # one, so returning on the first non-image part reports a false failure.
         for part in response.parts:
-            if part.text is not None:
-                print(part.text)
-            elif part.inline_data is not None:
-                image = part.as_image()
-                image.save(f"/tmp/{filename}.png")
+            if part.inline_data is None:
+                if part.text is not None:
+                    print(part.text)
+                continue
 
-                image_bytes = open(f"/tmp/{filename}.png", "rb").read()
-                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-                self.event_bus.append_message(
-                    Message.create(role="tool", content=f"/tmp/{filename}.png"),
-                )
-                self.event_bus.emit_image_generated(self.source, image_base64)
+            image_base64 = base64.b64encode(part.inline_data.data).decode("utf-8")
+            reference = self.event_bus.store_image(image_base64)
+            self.event_bus.append_tool_message(
+                f"Edited {image_reference} into {reference}"
+            )
+            self.event_bus.emit_image_generated(self.source, image_base64)
 
-                return {
-                    "output": "Image edited successfully.",
-                    "filename": f"/tmp/{filename}.png",
-                }
-
-            return {"output": "Failed to edit image."}
+            return {
+                "output": "Image edited successfully.",
+                "image_reference": reference,
+            }
 
         return {"output": "Failed to edit image."}

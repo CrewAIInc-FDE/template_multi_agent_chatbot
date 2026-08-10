@@ -27,9 +27,11 @@ DEPLOYMENT_KEY = os.environ["DEPLOYMENT_KEY"]
 WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
-# Events AMP relays via webhook. llm_thinking_chunk and image_generated are
-# intentionally omitted here: the flow pushes those straight to the channel
-# webhook (see ConversationalEventListener) to avoid duplicate delivery.
+# Events AMP relays via webhook. llm_thinking_chunk, image_generated and the
+# conversation_* events are intentionally omitted here: the flow pushes those
+# straight to the channel webhook (see ConversationalEventListener) to avoid
+# duplicate delivery. The conversation events are part of CrewAI's experimental
+# surface, so we don't assume AMP's relay list recognizes those names at all.
 WEBHOOK_EVENTS = [
     "flow_started",
     "flow_finished",
@@ -217,9 +219,15 @@ def send_message(channel_id):
 
     callback_url = f"{_public_base_url()}/api/webhook/{channel_id}"
 
+    # One kickoff == one chat turn. `id` is the conversation session: the flow is
+    # @persist()ed, so passing the same id restores the transcript on whatever
+    # fresh AMP process handles this turn. It must stay stable for the life of the
+    # channel — this is why it's the channel's conversation_id and not the
+    # previous kickoff_id we used to pass as restoreFromStateId.
     kickoff_body = {
         "inputs": {
-            "user_message": {"role": "user", "content": content},
+            "id": channel["conversation_id"],
+            "user_message": content,
             "webhook_url": callback_url,
         },
         "webhooks": {
@@ -230,14 +238,10 @@ def send_message(channel_id):
         },
     }
 
-    last_state_id = channel.get("last_state_id")
-    if last_state_id:
-        kickoff_body["restoreFromStateId"] = last_state_id
-
     app.logger.info(
-        "Kickoff -> channel=%s restore=%s content=%s",
+        "Kickoff -> channel=%s session=%s content=%s",
         channel_id,
-        last_state_id,
+        channel["conversation_id"],
         content[:80],
     )
 
@@ -258,7 +262,8 @@ def send_message(channel_id):
             kickoff_id = result.get("kickoff_id")
             app.logger.info("Kickoff OK: %s", kickoff_id)
             if kickoff_id:
-                db.update_channel_state_id(channel_id, kickoff_id)
+                # Tracked in memory only, for the watchdog and finalize dedupe.
+                # Session continuity now rides on inputs["id"], not this id.
                 with _kickoff_lock:
                     _pending_kickoffs[channel_id] = kickoff_id
                     _finalized_kickoffs.discard(kickoff_id)
@@ -532,6 +537,35 @@ def _handle_event(channel_id: str, ev: dict):
                 },
                 "seq": seq,
             },
+        )
+
+    elif etype == "conversation_route_selected":
+        # Which handler the router picked for this turn. Purely presentational,
+        # but it's the clearest way to show multi-agent routing during a demo.
+        _broadcast_to_channel(
+            channel_id,
+            {
+                "type": "conversation_route_selected",
+                "route": d.get("route", ""),
+                "previous_route": d.get("previous_intent"),
+                "seq": seq,
+            },
+        )
+
+    elif etype == "conversation_turn_completed":
+        # Safety net: fires after the flow returns, so it still lands if AMP
+        # dropped flow_finished. Carries no result, so the text comes from the
+        # streamed accumulation. _finalize_response dedupes per kickoff, so
+        # whichever of the two arrives first wins.
+        ar = _active_responses.get(channel_id)
+        final_text = (ar.get("text") or "").strip() if ar else ""
+        _finalize_response(
+            channel_id,
+            _pending_kickoffs.get(channel_id) or execution_id or "",
+            final_text,
+            call_id=ar.get("call_id") if ar else None,
+            seq=seq,
+            agent_role=agent_role,
         )
 
     elif etype == "flow_finished":

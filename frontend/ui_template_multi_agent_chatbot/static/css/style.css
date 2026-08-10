@@ -817,6 +817,16 @@ html, body {
   opacity: 0.7;
 }
 
+/* Router decision for a turn. Dimmer than tool activity — it's context for what
+   follows, not work in progress, so it shouldn't compete with the answer. */
+.route-activity {
+  opacity: 0.75;
+}
+
+.route-activity .tool-activity-icon {
+  opacity: 0.6;
+}
+
 .tool-activity-icon {
   width: 14px;
   height: 14px;

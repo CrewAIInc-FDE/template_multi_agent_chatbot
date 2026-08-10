@@ -1,18 +1,17 @@
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from crewai import LLM, Agent, Crew, Process, Task
+from crewai.utilities.types import LLMMessage
 from crewai_tools import MongoDBVectorSearchConfig
 from pydantic import BaseModel
 
+from template_multi_agent_chatbot.crews.history import format_history, utc_now
 from template_multi_agent_chatbot.tools import TrackedMongoDBVectorSearchTool
-from template_multi_agent_chatbot.types import Message
 
 
 class CrewExecutionResult(BaseModel):
-    user_message: str
     query_chunks: list[dict[str, list[dict[str, Any]]]]
     agent_response: str
 
@@ -20,12 +19,10 @@ class CrewExecutionResult(BaseModel):
 _DOCS_SKILL_PATH = str(
     Path(__file__).resolve().parent.parent / "skills" / "crewai-docs"
 )
-_NEWLINE = "\n"
 
 
 class CrewaiDocsCrew:
-    def __init__(self, user_message: Message, messages: list[Message]):
-        self._user_message = user_message
+    def __init__(self, messages: list[LLMMessage]):
         self._messages = messages
         self._query_chunks: list[dict[str, list[dict[str, Any]]]] = []
 
@@ -61,9 +58,11 @@ check the official docs at https://docs.crewai.com.""",
                     query_config=MongoDBVectorSearchConfig(limit=10),
                 ),
             ],
+            max_iter=8,
+            allow_delegation=False,
         )
 
-    def _task(self) -> Task:
+    def _task(self, agent: Agent) -> Task:
         return Task(
             description=f"""Answer the user's question about CrewAI by searching the official documentation
 via the MongoDB vector search tool. Provide a thorough, accurate answer based on the docs.
@@ -72,10 +71,10 @@ Read the conversation history carefully to avoid repeating information, greeting
 you have already used.
 
 CONVERSATION HISTORY (last 10 messages):
-{_NEWLINE.join([f"[{msg.role.upper()}] {msg.content.strip()}" for msg in self._messages[-10:]])}
+{format_history(self._messages)}
 
 CURRENT DATE AND TIME (UTC):
-{datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")}
+{utc_now()}
 
 KEY RULES:
 - Before calling a tool, briefly state what you are about to do.
@@ -86,13 +85,16 @@ KEY RULES:
 """,
             expected_output="A thorough answer to the user's CrewAI question written in their language, "
             "grounded in the official CrewAI documentation, with code examples where relevant.",
-            agent=self._agent(),
+            agent=agent,
         )
 
     def _crew(self) -> Crew:
+        # One agent instance: `_agent()` opens a MongoDB client, so building it
+        # for both the crew roster and the task doubles the connections per turn.
+        agent = self._agent()
         return Crew(
-            agents=[self._agent()],
-            tasks=[self._task()],
+            agents=[agent],
+            tasks=[self._task(agent)],
             process=Process.sequential,
             verbose=True,
         )
@@ -100,7 +102,6 @@ KEY RULES:
     def execute(self) -> CrewExecutionResult:
         raw = self._crew().kickoff().raw
         return CrewExecutionResult(
-            user_message=self._user_message.content,
             query_chunks=self._query_chunks,
             agent_response=raw,
         )

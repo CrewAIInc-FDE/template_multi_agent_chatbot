@@ -5,7 +5,9 @@ description = "template_multi_agent_chatbot using crewAI"
 authors = [{ name = "Your Name", email = "you@example.com" }]
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "crewai[google-genai,tools]==1.15.0",
+    # Pinned: the conversational surface lives under crewai.experimental and may
+    # change without a major-version bump until it graduates.
+    "crewai[google-genai,tools]==1.15.14",
     "crewai-tools[mongodb]",
     "openinference-instrumentation-crewai==1.1.4",
     "arize-otel>=0.12.0",
@@ -15,7 +17,7 @@ dependencies = [
 kickoff = "template_multi_agent_chatbot.main:kickoff"
 run_crew = "template_multi_agent_chatbot.main:kickoff"
 plot = "template_multi_agent_chatbot.main:plot"
-run_with_trigger = "template_multi_agent_chatbot.main:run_with_trigger"
+chat = "template_multi_agent_chatbot.main:chat"
 
 [build-system]
 requires = ["hatchling"]
@@ -23,3 +25,4 @@ build-backend = "hatchling.build"
 
 [tool.crewai]
 type = "flow"
+project_id = "aa673433-d0b8-41ad-89ad-e30af20decb4"

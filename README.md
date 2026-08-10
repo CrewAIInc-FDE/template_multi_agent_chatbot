@@ -10,10 +10,20 @@ A conversational chatbot built with [CrewAI Flows](https://docs.crewai.com), dep
 
 Two independent apps that talk over HTTP:
 
-- **Backend** (`src/template_multi_agent_chatbot/`) — a `ConversationalFlow` deployed to AMP. `@persist()` restores state per `conversation_id`, the `MessageClassifierAgent` routes each message (`SIMPLE`, `IMAGE_CREATION_UPDATE`, `INTERNET_SEARCH`, `CREWAI_DOCS`) to the matching crew, and agents emit events (`ConversationalEventBus` → `ConversationalEventListener` → `Dispatcher`) to a webhook.
-- **Frontend** (`frontend/ui_template_multi_agent_chatbot/`) — a Flask app. It stores messages in SQLite, fires `POST /kickoff` to AMP, receives events back on `/api/webhook` (via webhook.site), and streams them to the browser over SSE.
+- **Backend** (`src/template_multi_agent_chatbot/`) — a `ConversationalFlow` built on CrewAI's [conversational flows](https://docs.crewai.com/v1.15.14/en/guides/flows/conversational-flows) (`conversational = True` + `@ConversationConfig`), deployed to AMP. The LLM router in `routing/router_config.py` sends each turn to a route (`converse`, `IMAGE_CREATION_UPDATE`, `INTERNET_SEARCH`, `CREWAI_DOCS`); `converse` is the framework's built-in chat handler, the rest are `@listen` handlers backed by crews. Class-level `@persist()` restores the transcript per session id. Events AMP doesn't relay go out via `ConversationalEventBus` → `ConversationalEventListener` → `Dispatcher`.
+- **Frontend** (`frontend/ui_template_multi_agent_chatbot/`) — a Flask app. It stores messages in SQLite, fires `POST /kickoff` to AMP, receives events back on `/api/webhook/<channel_id>`, and streams them to the browser over SSE.
 
-**Request flow:** browser → Flask (`202`, saves to SQLite) → `POST /kickoff` to AMP → flow classifies & runs a crew → tools emit events → webhook.site → Flask `/api/webhook` → SSE → browser.
+**Request flow:** browser → Flask (`202`, saves to SQLite) → `POST /kickoff` to AMP → router picks a route → handler runs → events → Flask `/api/webhook/<channel_id>` → SSE → browser.
+
+### One kickoff, one turn
+
+AMP only exposes `POST /kickoff`, but the conversational runtime hydrates a turn from `handle_turn()` — passing `user_message` in `inputs` alone is silently dropped. `ConversationalFlow.kickoff()` bridges the two: a kickoff carrying `user_message` becomes one `handle_turn()`. Session continuity rides on a stable `inputs["id"]` (the channel's `conversation_id`) plus class-level `@persist()`, so any fresh AMP process restores the conversation.
+
+Two settings that look optional but aren't, both documented at their definition in `main.py`: `@persist()` must stay **class-level** (a terminal-step `@persist` saves but never restores, silently reducing every chat to one turn), and `defer_trace_finalization` must stay **`False`** (deferral suppresses the per-turn `flow_finished` the UI finalizes on).
+
+### Adding a use case
+
+Add an `@listen("YOUR_ROUTE")` handler whose method name differs from the label, give it a one-line docstring, and add the label to `routing/router_config.py`. The docstring feeds the router's route catalog.
 
 ## Setup
 
@@ -37,7 +47,15 @@ crewai deploy   # deploy the flow to AMP
 bin/start       # installs FE deps, starts Flask + ngrok on $PORT (default 5005)
 ```
 
-Point webhook.site to XHR-redirect events to `<PUBLIC_BASE_URL>/api/webhook`, open the local URL, create a channel, and chat.
+Open the local URL, create a channel, and chat. AMP posts events straight to `<PUBLIC_BASE_URL>/api/webhook/<channel_id>`, authenticated with `WEBHOOK_TOKEN` — no third-party relay involved.
+
+To exercise the flow without the UI:
+
+```bash
+uv run chat      # local multi-turn REPL against the flow
+uv run kickoff   # one turn, using the exact inputs AMP sends
+uv run plot      # render the flow graph
+```
 
 ## Deploying the UI to Heroku
 

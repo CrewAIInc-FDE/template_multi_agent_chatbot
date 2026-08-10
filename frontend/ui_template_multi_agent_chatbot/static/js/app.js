@@ -190,6 +190,11 @@
     } else if (data.type === "kickoff_started" || data.type === "flow_started") {
       setTyping(true);
       setExecuting(true);
+    } else if (data.type === "conversation_route_selected") {
+      createRouteActivity(data.route);
+      scrollToBottom();
+    } else if (data.type === "conversation_turn_completed") {
+      handleFlowFinished(data);
     } else if (data.type === "flow_finished") {
       handleFlowFinished(data);
     } else if (data.type === "kickoff_error") {
@@ -529,6 +534,25 @@
       <img src="/static/img/tool.svg" class="tool-activity-icon" />
       <span class="tool-activity-text">Using <strong>${escapeHtml(displayName)}</strong>...</span>
       <div class="tool-activity-spinner"><span></span><span></span><span></span></div>
+    `;
+
+    $messages.insertBefore(div, $typingIndicator);
+    return div;
+  }
+
+  // Shows which handler the router picked. `converse` is the built-in chat
+  // route, so label it as such rather than leaking the internal name.
+  function createRouteActivity(route) {
+    if (!route) return null;
+
+    const div = document.createElement("div");
+    div.className = "tool-activity route-activity";
+    div.dataset.route = route;
+
+    const label = route === "converse" ? "Conversation" : humanizeToolName(route);
+    div.innerHTML = `
+      <img src="/static/img/tool.svg" class="tool-activity-icon" />
+      <span class="tool-activity-text">Routed to <strong>${escapeHtml(label)}</strong></span>
     `;
 
     $messages.insertBefore(div, $typingIndicator);

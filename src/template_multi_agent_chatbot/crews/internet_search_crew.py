@@ -1,19 +1,18 @@
-from datetime import datetime, timezone
 from pathlib import Path
 
 from crewai import LLM, Agent, Crew, Process, Task
+from crewai.utilities.types import LLMMessage
 from crewai_tools import ScrapeWebsiteTool, SerperDevTool
 
-from template_multi_agent_chatbot.types import Message
+from template_multi_agent_chatbot.crews.history import format_history, utc_now
 
 _SEARCH_SKILL_PATH = str(
     Path(__file__).resolve().parent.parent / "skills" / "internet-searching"
 )
-_NEWLINE = "\n"
 
 
 class InternetSearchCrew:
-    def __init__(self, messages: list[Message]):
+    def __init__(self, messages: list[LLMMessage]):
         self._messages = messages
 
     def _agent(self) -> Agent:
@@ -43,9 +42,11 @@ actually consulted. Never omit sources and never fabricate a URL you didn't visi
                 SerperDevTool(),
                 ScrapeWebsiteTool(),
             ],
+            max_iter=8,
+            allow_delegation=False,
         )
 
-    def _task(self) -> Task:
+    def _task(self, agent: Agent) -> Task:
         return Task(
             description=f"""Research the user's question using internet search and web scraping as needed.
 Provide a thorough, well-sourced answer based on the conversation history.
@@ -54,10 +55,10 @@ Read the conversation history carefully to avoid repeating information, greeting
 you have already used.
 
 CONVERSATION HISTORY (last 10 messages):
-{_NEWLINE.join([f"[{msg.role.upper()}] {msg.content.strip()}" for msg in self._messages[-10:]])}
+{format_history(self._messages)}
 
 CURRENT DATE AND TIME (UTC):
-{datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")}
+{utc_now()}
 
 KEY RULES:
 - Before calling a tool, briefly state what you are about to do.
@@ -67,13 +68,16 @@ KEY RULES:
 """,
             expected_output="A thorough answer to the user's question written in their language, "
             "with source citations appended as a URL list.",
-            agent=self._agent(),
+            agent=agent,
         )
 
     def _crew(self) -> Crew:
+        # One agent instance, shared by the crew roster and the task — building it
+        # twice leaves `agents=[...]` and `task.agent` as different objects.
+        agent = self._agent()
         return Crew(
-            agents=[self._agent()],
-            tasks=[self._task()],
+            agents=[agent],
+            tasks=[self._task(agent)],
             process=Process.sequential,
             verbose=True,
         )
