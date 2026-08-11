@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "arize-admin": {
+      "source": "Arize-ai/arize-skills",
+      "sourceType": "github",
+      "skillPath": "skills/arize-admin/SKILL.md",
+      "computedHash": "a61e1b4afa6b4d1726a878f6853137a8d1aea6c34f94e7cec6a70276911246ef"
+    },
+    "arize-ai-provider-integration": {
+      "source": "Arize-ai/arize-skills",
+      "sourceType": "github",
+      "skillPath": "skills/arize-ai-provider-integration/SKILL.md",
+      "computedHash": "7f65900cb5d26265158ac871a0d5dc9886f6dfc5da5aaa5c906a7c0c75c34676"
+    },
+    "arize-trace": {
+      "source": "Arize-ai/arize-skills",
+      "sourceType": "github",
+      "skillPath": "skills/arize-trace/SKILL.md",
+      "computedHash": "35f477665172107719edfebf73df568cbc79de5b6df7d240fce973d22241ec45"
+    }
+  }
+}
