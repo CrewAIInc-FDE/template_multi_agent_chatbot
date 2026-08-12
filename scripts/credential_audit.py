@@ -20,6 +20,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 PER_USER_MARKER = "user_context"
 
 
+def _platform_identity() -> tuple[str, str]:
+    """Platform tools follow the token shim: per-user when the shim is applied
+    and the user has connected their own CrewAI account, org-wide otherwise."""
+    from template_multi_agent_chatbot import platform_token_shim
+
+    if platform_token_shim._applied:
+        return (
+            "per-user*",
+            "user's CrewAI integration token when connected, else org token",
+        )
+    return ("shared", "CrewAI Platform app — org integration token")
+
+
 def classify(tool) -> tuple[str, str]:
     """Return (identity, why) for one tool.
 
@@ -36,7 +49,7 @@ def classify(tool) -> tuple[str, str]:
     if PER_USER_MARKER in source:
         return ("per-user", "reads the signed-in user's token at call time")
     if type(tool).__module__.startswith("crewai_tools.tools.crewai_platform_tools"):
-        return ("shared", "CrewAI Platform app — org integration token")
+        return _platform_identity()
     return ("n/a", "no user identity involved")
 
 
@@ -74,7 +87,7 @@ def main() -> int:
         apps = list(getattr(agent, "apps", []) or [])
         rows = [(t.name, *classify(t)) for t in tools]
         for app in apps:
-            rows.append((app, "shared", "CrewAI Platform app — org integration token"))
+            rows.append((app, *_platform_identity()))
 
         if not rows:
             print(f"{label:18} {'-':10} (no tools)")
@@ -86,9 +99,15 @@ def main() -> int:
     print("totals:", ", ".join(f"{k}={v}" for k, v in sorted(summary.items())))
     if summary.get("shared"):
         print(
-            "\nNOTE: 'shared' tools act as one org-wide account, so every user "
-            "sees the same data.\nCrewAI's integration token cannot be scoped to "
-            "a person — per-user needs our own OAuth app for that provider."
+            "\nNOTE: 'shared' tools act as one org-wide account — every user sees "
+            "the same data."
+        )
+    if summary.get("per-user*"):
+        print(
+            "\nNOTE: 'per-user*' is conditional. These use the signed-in user's own "
+            "CrewAI\nintegration token when they have connected one, and fall back to "
+            "the shared org\ntoken otherwise. Store a token under the 'crewai_platform' "
+            "provider to activate."
         )
     return 0
 

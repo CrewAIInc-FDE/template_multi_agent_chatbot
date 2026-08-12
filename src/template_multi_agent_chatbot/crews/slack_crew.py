@@ -5,6 +5,7 @@ from crewai.utilities.types import LLMMessage
 
 from template_multi_agent_chatbot.crews.history import format_history, utc_now
 from template_multi_agent_chatbot.crews.settings import crew_verbose, load_skill
+from template_multi_agent_chatbot import platform_token_shim, user_context
 from template_multi_agent_chatbot.platform_health import warn_if_unavailable
 
 
@@ -53,6 +54,11 @@ class SlackCrew:
         # connected; surface that in the logs rather than letting the agent
         # improvise an excuse.
         warn_if_unavailable(apps)
+
+        # Lets these tools use the chatting user's own CrewAI integration token
+        # when they have one, instead of the shared org connection. Without a
+        # user token this is a no-op and behaviour is unchanged.
+        platform_token_shim.apply()
 
         return Agent(
             role="Slack Workspace Assistant",
