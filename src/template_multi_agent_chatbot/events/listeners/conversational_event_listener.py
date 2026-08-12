@@ -6,7 +6,6 @@ from crewai.events.types.flow_events import (
 from crewai.events.types.llm_events import LLMThinkingChunkEvent
 
 from template_multi_agent_chatbot.events.clients import Dispatcher
-from template_multi_agent_chatbot.events.types import ImageGenerated
 
 
 class ConversationalEventListener(BaseEventListener):
@@ -44,8 +43,20 @@ class ConversationalEventListener(BaseEventListener):
             cls._instance._dispatcher = Dispatcher(url)
         return cls._instance
 
+    def dispatch(self, event) -> None:
+        """Send one event to the UI without going through the event bus.
+
+        Bus delivery is not reliable inside the deployed runtime, so callers that
+        own their event can deliver it directly.
+        """
+        self._dispatcher.dispatch(event)
+
     def setup_listeners(self, crewai_event_bus):
-        @crewai_event_bus.on(ImageGenerated)
+        # ImageGenerated is deliberately absent: the event bus delivers it
+        # locally but not inside the deployed runtime, so ConversationalEventBus
+        # hands it straight to `dispatch()`. Listening here as well would send it
+        # twice locally, and these events carry no id the UI can dedupe on — the
+        # user would simply see the image rendered twice.
         @crewai_event_bus.on(LLMThinkingChunkEvent)
         @crewai_event_bus.on(ConversationRouteSelectedEvent)
         @crewai_event_bus.on(ConversationTurnCompletedEvent)

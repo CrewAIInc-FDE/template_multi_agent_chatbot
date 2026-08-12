@@ -57,15 +57,26 @@ class ConversationalEventBus:
         return self._flow.state.get_image(reference)
 
     def emit_image_generated(self, source: Callable, image_base64: str) -> None:
-        crewai_event_bus.emit(
-            source=source,
-            event=ImageGenerated(
-                source_type=source.__name__,
-                result={"image": image_base64},
-            ),
+        event = ImageGenerated(
+            source_type=source.__name__,
+            result={"image": image_base64},
         )
+        crewai_event_bus.emit(source=source, event=event)
+
         if self._listener is None:
             self._write_local_copy(image_base64)
+            return
+
+        # Deliver directly as well as emitting. Emitting alone is enough locally,
+        # but on AMP the listener's bus registration doesn't fire — the image
+        # never reached the browser even though the tool succeeded and the agent
+        # announced it. This is our own event, so we can hand it to the webhook
+        # ourselves instead of depending on bus delivery. The UI dedupes on
+        # event_id, so an extra copy is harmless if the bus does fire.
+        try:
+            self._listener.dispatch(event)
+        except Exception as exc:
+            logger.warning("Direct image dispatch failed: %s", exc)
 
     def _write_local_copy(self, image_base64: str) -> None:
         """Save the image where a human can open it.
