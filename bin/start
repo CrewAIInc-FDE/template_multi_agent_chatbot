@@ -15,8 +15,12 @@ if [[ -f "$FRONTEND_DIR/.env" ]]; then
   set +a
 fi
 
-NGROK_DOMAIN="${NGROK_DOMAIN:-crewai-chatbot.ngrok.app}"
+# A reserved domain requires a paid ngrok plan (ERR_NGROK_313 otherwise). Leave
+# it empty to take whatever ephemeral URL ngrok assigns, which works on free
+# accounts — the script discovers the URL and hands it to Flask.
+NGROK_DOMAIN="${NGROK_DOMAIN:-}"
 PORT="${PORT:-5005}"
+NGROK_LOG="${TMPDIR:-/tmp}/crewai-chatbot-ngrok.log"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,12 +46,91 @@ trap cleanup EXIT INT TERM
 # ── Dependencies via uv ──────────────────────────────────────────────────────
 # The UI is a standalone Flask app (it talks to the AMP deployment over HTTP),
 # so we only install the frontend's deps here — not the backend/crew packages.
+#
+# Always install into a dedicated venv. Installing into whatever `python3`
+# happens to be fails outright on Homebrew and other PEP 668 "externally
+# managed" interpreters, and would pollute the system environment where it
+# doesn't.
+VENV_DIR="$FRONTEND_DIR/.venv"
+VENV_PYTHON="$VENV_DIR/bin/python"
+
+if [[ ! -x "$VENV_PYTHON" ]]; then
+  echo "Creating virtual environment at $VENV_DIR ..."
+  uv venv "$VENV_DIR"
+fi
+
 echo "Installing dependencies..."
-uv pip install -q -e "$FRONTEND_DIR" --python "$(which python3)"
+uv pip install -q -e "$FRONTEND_DIR" --python "$VENV_PYTHON"
+
+# ── Start ngrok first ────────────────────────────────────────────────────────
+# Before Flask, because app.py reads PUBLIC_BASE_URL at import: AMP has to be
+# told where to deliver webhooks, and on a free plan that URL isn't known until
+# ngrok assigns it.
+start_ngrok() {
+  local args=(http "$PORT" --log stdout --log-level info)
+  [[ -n "$NGROK_DOMAIN" ]] && args+=(--url "$NGROK_DOMAIN")
+  ngrok "${args[@]}" > "$NGROK_LOG" 2>&1 &
+  NGROK_PID=$!
+}
+
+# ngrok's local API is the only reliable signal that a tunnel actually came up;
+# the process staying alive is not.
+tunnel_url() {
+  "$VENV_PYTHON" - <<'PY' 2>/dev/null
+import json, urllib.request
+try:
+    with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=2) as r:
+        for t in json.load(r).get("tunnels", []):
+            if (t.get("public_url") or "").startswith("https://"):
+                print(t["public_url"]); break
+except Exception:
+    pass
+PY
+}
+
+await_tunnel() {
+  local url=""
+  for _ in $(seq 1 15); do
+    url="$(tunnel_url)"
+    [[ -n "$url" ]] && { echo "$url"; return 0; }
+    kill -0 "$NGROK_PID" 2>/dev/null || return 1
+    sleep 1
+  done
+  return 1
+}
+
+if [[ -n "$NGROK_DOMAIN" ]]; then
+  echo "Starting ngrok tunnel → https://$NGROK_DOMAIN ..."
+else
+  echo "Starting ngrok tunnel (ephemeral URL) ..."
+fi
+start_ngrok
+PUBLIC_URL="$(await_tunnel || true)"
+
+# A reserved domain needs a paid plan. Rather than failing, drop the domain and
+# retry — an ephemeral URL works fine for a local session.
+if [[ -z "$PUBLIC_URL" && -n "$NGROK_DOMAIN" ]]; then
+  echo "  Could not claim $NGROK_DOMAIN. Reason:"
+  grep -oE 'ERR_NGROK_[0-9]+|failed to start tunnel: [^\\]*' "$NGROK_LOG" | head -2 | sed 's/^/    /'
+  echo "  Retrying with an ephemeral URL..."
+  kill "$NGROK_PID" 2>/dev/null || true
+  NGROK_DOMAIN=""
+  start_ngrok
+  PUBLIC_URL="$(await_tunnel || true)"
+fi
+
+if [[ -z "$PUBLIC_URL" ]]; then
+  echo ""
+  echo "ERROR: ngrok did not establish a tunnel. Webhooks from AMP cannot be"
+  echo "delivered, so replies would only arrive via slow status polling."
+  echo "Last lines of $NGROK_LOG:"
+  tail -5 "$NGROK_LOG" | sed 's/^/  /'
+  exit 1
+fi
 
 # ── Start Flask ──────────────────────────────────────────────────────────────
 echo "Starting Flask on port $PORT..."
-PORT="$PORT" python3 "$UI_DIR/app.py" 2>&1 &
+PORT="$PORT" PUBLIC_BASE_URL="$PUBLIC_URL" "$VENV_PYTHON" "$UI_DIR/app.py" 2>&1 &
 FLASK_PID=$!
 sleep 2
 
@@ -56,18 +139,12 @@ if ! kill -0 "$FLASK_PID" 2>/dev/null; then
   exit 1
 fi
 
-# ── Start ngrok ──────────────────────────────────────────────────────────────
-echo "Starting ngrok tunnel → https://$NGROK_DOMAIN ..."
-ngrok http "$PORT" --url "$NGROK_DOMAIN" --log stdout --log-level warn > /dev/null 2>&1 &
-NGROK_PID=$!
-sleep 2
-
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "  Local:  http://localhost:$PORT"
-echo "  Public: https://$NGROK_DOMAIN"
+echo "  Public: $PUBLIC_URL"
 echo ""
-echo "  Webhook endpoint: https://$NGROK_DOMAIN/api/webhook/<channel_id>"
+echo "  Webhook endpoint: $PUBLIC_URL/api/webhook/<channel_id>"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "Press Ctrl+C to stop."

@@ -343,7 +343,10 @@ _finalized_kickoffs: set[str] = set()
 _kickoff_lock = threading.Lock()
 
 _IDLE_TIMEOUT = 10
-_WATCHDOG_MAX_LIFETIME = 60
+# How long a single turn may take before the UI stops waiting. Research and
+# Slack turns routinely run past a minute — several tool calls, each with its own
+# latency — so a 60s ceiling abandoned answers that were still being produced.
+_WATCHDOG_MAX_LIFETIME = int(os.environ.get("TURN_TIMEOUT", "300"))
 
 
 def _parse_dt(val) -> float:
@@ -998,6 +1001,19 @@ def _status_watchdog(channel_id, kickoff_id):
     )
     with _kickoff_lock:
         _pending_kickoffs.pop(channel_id, None)
+
+    # Tell the browser. Dropping out silently leaves the typing indicator
+    # spinning forever, which reads as a hung app rather than a slow turn.
+    _broadcast_to_channel(
+        channel_id,
+        {
+            "type": "kickoff_error",
+            "error": (
+                f"No response after {_WATCHDOG_MAX_LIFETIME}s. The run may still "
+                "be going on AMP — check its logs, or raise TURN_TIMEOUT."
+            ),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
