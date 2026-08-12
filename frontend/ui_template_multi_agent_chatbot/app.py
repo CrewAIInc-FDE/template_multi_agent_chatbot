@@ -12,10 +12,17 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from dotenv import load_dotenv
+
+# Must run before `import auth`: that module reads GOOGLE_CLIENT_ID at import
+# time, so loading .env afterwards would leave SSO silently disabled whenever the
+# credentials live in the file rather than the real environment.
+dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+load_dotenv(dotenv_path)
+
 import auth
 import db
 import requests as http_requests
-from dotenv import load_dotenv
 from flask import (
     Flask,
     Response,
@@ -31,9 +38,6 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
-
-dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env")
-load_dotenv(dotenv_path)
 
 DEPLOYMENT_URL = os.environ.get("DEPLOYMENT_URL", "").strip().rstrip("/")
 DEPLOYMENT_KEY = os.environ.get("DEPLOYMENT_KEY", "").strip()
@@ -51,6 +55,13 @@ SECRET_KEY = (
     os.environ.get("SECRET_KEY", "").strip()
     or (f"derived-from-app-password:{APP_PASSWORD}" if APP_PASSWORD else "")
     or secrets.token_urlsafe(32)
+)
+
+# True when the key is regenerated on every start, which invalidates sessions on
+# each restart. Only happens with neither SECRET_KEY nor APP_PASSWORD — i.e.
+# exactly the Google SSO deployment, where there is no password to derive from.
+SECRET_KEY_IS_EPHEMERAL = not (
+    os.environ.get("SECRET_KEY", "").strip() or APP_PASSWORD
 )
 
 # Per-session send limits. In-process on purpose: the deployment runs a single
@@ -301,9 +312,16 @@ def _rate_limit_error() -> str | None:
 
 if not _auth_enabled():
     app.logger.warning(
-        "APP_PASSWORD is not set — the UI is UNAUTHENTICATED. Fine locally; set "
-        "it before exposing this anywhere, or anyone with the URL can spend your "
-        "API budget."
+        "Neither GOOGLE_CLIENT_ID nor APP_PASSWORD is set — the UI is "
+        "UNAUTHENTICATED. Fine locally; set one before exposing this anywhere, "
+        "or anyone with the URL can spend your API budget."
+    )
+elif SECRET_KEY_IS_EPHEMERAL:
+    app.logger.warning(
+        "SECRET_KEY is not set, so the session key is regenerated on every "
+        "start and everyone is signed out whenever this process restarts — "
+        "which a hosted dyno does at least daily. Harmless locally; set it "
+        "explicitly anywhere it stays running."
     )
 
 if _missing_config():

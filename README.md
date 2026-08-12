@@ -61,20 +61,50 @@ uv run plot      # render the flow graph
 
 The UI is self-contained in `frontend/` (its own `pyproject.toml` / `uv.lock` — no CrewAI deps). The repo root stays reserved for AMP, so only `frontend/` is deployed, via the official `heroku/python` buildpack + `git subtree` (no third-party buildpacks).
 
+The buildpack detects `frontend/uv.lock` and runs `uv sync --locked`, and reads the Python version from `frontend/.python-version` — no packaging changes needed.
+
+**1. Create the Google OAuth client first** (Google Cloud Console → Credentials → OAuth client ID → *Web application*). The authorized redirect URI must match exactly:
+
+```
+https://<your-ui-app>.herokuapp.com/auth/google/callback
+```
+
+**2. Create the app and set config.**
+
 ```bash
-# One-time
 heroku create <your-ui-app>            # or: heroku git:remote -a <your-ui-app>
 heroku buildpacks:set heroku/python -a <your-ui-app>
-heroku config:set -a <your-ui-app> \
-  DEPLOYMENT_URL=... DEPLOYMENT_KEY=... WEBHOOK_TOKEN=... \
-  PUBLIC_BASE_URL=https://<your-ui-app>.herokuapp.com
 
-# Deploy the frontend/ subdirectory (commit first)
-git subtree push --prefix frontend heroku main
-# If rejected (non-fast-forward):
+heroku config:set -a <your-ui-app> \
+  DEPLOYMENT_URL=...  DEPLOYMENT_KEY=...  WEBHOOK_TOKEN=... \
+  PUBLIC_BASE_URL=https://<your-ui-app>.herokuapp.com \
+  GOOGLE_CLIENT_ID=...  GOOGLE_CLIENT_SECRET=...  ALLOWED_EMAIL_DOMAINS=crewai.com \
+  SECRET_KEY="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')" \
+  RATE_LIMIT_MESSAGES=30  DAILY_MESSAGE_CAP=500  TURN_TIMEOUT=300
+```
+
+`WEBHOOK_TOKEN` must be byte-identical to the AMP deployment's, or every incoming event 401s and replies only arrive via the slow status-polling fallback.
+
+**3. Deploy just the `frontend/` subdirectory** (commit first). Substitute your branch for `main`:
+
+```bash
 git push heroku "$(git subtree split --prefix frontend main)":refs/heads/main --force
 ```
 
-- `PORT` is injected by Heroku — don't set it.
-- Run a **single web dyno** (`--workers 1`): SSE/response state is in-process.
-- SQLite at `frontend/ui_template_multi_agent_chatbot/db/chatbot.db` is on ephemeral disk and resets on each deploy; use a managed DB for persistence.
+### Settings that look optional but aren't
+
+- **`SECRET_KEY`** — without it the session key is regenerated on every boot, so everyone is signed out whenever the dyno restarts (at least daily). It's only derived from `APP_PASSWORD`, which SSO deployments don't have. The app warns at startup.
+- **`PUBLIC_BASE_URL`** — used for *both* the AMP webhook callback and the OAuth redirect. If it doesn't match the real URL, sign-in breaks and events go nowhere.
+- **Single web dyno.** SSE subscribers, pending kickoffs and the watchdog are in-process; scaling past one dyno silently breaks replies.
+- **`PORT`** is injected by Heroku — don't set it.
+
+### Auth: SSO in production, password locally
+
+The app picks the first configured option: **Google SSO** (`GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET`) → **shared password** (`APP_PASSWORD`) → **no login**.
+
+Use SSO on Heroku, where the callback URL is stable. Locally, prefer `APP_PASSWORD`: `bin/start` overwrites `PUBLIC_BASE_URL` with an ephemeral ngrok URL that changes each restart, and Google rejects redirect URIs it hasn't been told about.
+
+### Known limits
+
+- Chat history lives in SQLite on ephemeral disk and **resets on every deploy and restart**. Use a managed database if it needs to survive.
+- An idle Eco dyno sleeps; a restart mid-turn loses that turn's in-process state, so the reply never renders.
