@@ -78,6 +78,11 @@ ROUTE_DESCRIPTIONS = {
         "a channel, finding a conversation or thread, who is in a channel, or "
         "who to ask about a topic."
     ),
+    "COMMS": (
+        "The user's OWN email or calendar: messages they received or sent, who "
+        "contacted them, what is on their schedule, when a meeting is, or who is "
+        "attending it."
+    ),
 }
 
 # Each route needs a backing service. Without one, the handler dies mid-turn on
@@ -96,6 +101,10 @@ ROUTE_REQUIREMENTS = {
     # Presence of the token only proves we can call the Platform API — whether
     # Slack is actually connected is checked at run time by platform_health.
     "SLACK": ("CREWAI_PLATFORM_INTEGRATION_TOKEN",),
+    # Per-user: the deployment needs no Google credentials of its own. What it
+    # needs is the ability to fetch a user's token, which rides on the shared
+    # webhook secret.
+    "COMMS": ("WEBHOOK_TOKEN",),
 }
 
 

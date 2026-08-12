@@ -52,6 +52,9 @@ CASES: list[tuple[str, str]] = [
     ("what did the team say about pricing in slack?", "SLACK"),
     ("summarise recent discussion in #crewai-opensource", "SLACK"),
     ("who is in the support channel?", "SLACK"),
+    ("any email from sarah about the invoice?", "COMMS"),
+    ("what's on my calendar tomorrow?", "COMMS"),
+    ("who is attending the Acme meeting?", "COMMS"),
     ("how do I create a crew with custom tools in CrewAI?", "CREWAI_DOCS"),
     ("explain how memory works in crewai", "CREWAI_DOCS"),
 ]
@@ -148,7 +151,7 @@ def run_case(prompt: str, routing_only: bool) -> Recorder:
         recorder.route_at = time.perf_counter()
         return recorder
 
-    flow.kickoff(inputs={"id": f"probe-{uuid.uuid4().hex[:8]}", "user_message": prompt})
+    flow.kickoff(inputs={"id": str(uuid.uuid4()), "user_message": prompt})
     if recorder.route is None:
         recorder.route = flow.state.last_intent
     return recorder

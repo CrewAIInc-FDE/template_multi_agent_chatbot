@@ -10,6 +10,7 @@ from crewai.flow import Flow, listen, persist
 from openinference.instrumentation.crewai import CrewAIInstrumentor
 
 from template_multi_agent_chatbot.crews import (
+    CommsCrew,
     CrewaiDocsCrew,
     ImageCreationCrew,
     InternetSearchCrew,
@@ -153,6 +154,13 @@ class ConversationalFlow(Flow[ChatbotState]):
             event_bus=self.event_bus,
             source=self.handle_image_creation,
         ).execute()
+        self.append_assistant_message(reply)
+        return reply
+
+    @listen("COMMS")
+    def handle_comms(self) -> str:
+        """Search the user's own email and calendar, as that user."""
+        reply = CommsCrew(messages=self.conversation_messages).execute()
         self.append_assistant_message(reply)
         return reply
 

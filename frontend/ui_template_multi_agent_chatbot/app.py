@@ -139,6 +139,7 @@ _PUBLIC_ENDPOINTS = {
     "login",
     "google_login",
     "google_callback",
+    "google_connect",
     "webhook",
     "webhook_preflight",
     "internal_credentials",
@@ -219,7 +220,53 @@ def google_callback():
     session.permanent = True
     app.logger.info("Signed in: %s", identity["email"])
 
+    # Store the grant whenever this pass asked for data scopes, so the automation
+    # can act as this person. Sign-in alone carries no useful scopes, so it isn't
+    # worth persisting.
+    if session.pop("oauth_connect", False):
+        expiry = datetime.now(timezone.utc) + timedelta(
+            seconds=int(tokens.get("expires_in", 3600))
+        )
+        db.save_credentials(
+            identity["user_id"],
+            "google",
+            tokens["access_token"],
+            refresh_token=tokens.get("refresh_token"),
+            expires_at=expiry.isoformat(),
+            scopes=tokens.get("scope"),
+        )
+        app.logger.info("Connected Google data access for %s", identity["email"])
+
     return redirect(session.pop("oauth_next", None) or url_for("index"))
+
+
+@app.route("/auth/google/connect")
+def google_connect():
+    """Second OAuth pass asking for Gmail/Calendar on top of sign-in.
+
+    Separate from signing in on purpose: getting into the app shouldn't demand
+    mailbox access, and Google shows a much heavier consent screen for these
+    scopes. `include_granted_scopes` means the resulting token covers both.
+    """
+    state = auth.new_state()
+    session["oauth_state"] = state
+    session["oauth_next"] = _safe_next(request.args.get("next"))
+    session["oauth_connect"] = True
+    return redirect(
+        auth.authorization_url(
+            _redirect_uri(),
+            state,
+            scopes=(*auth.BASE_SCOPES, *auth.GOOGLE_DATA_SCOPES),
+        )
+    )
+
+
+@app.route("/auth/google/disconnect", methods=["POST"])
+def google_disconnect():
+    user = session.get("user") or {}
+    if user.get("user_id"):
+        db.delete_credentials(user["user_id"], "google")
+    return jsonify({"status": "disconnected"})
 
 
 @app.route("/api/me")
