@@ -30,6 +30,21 @@ _SCHEMA = """
 
     CREATE INDEX IF NOT EXISTS idx_messages_channel
         ON messages(channel_id, timestamp);
+
+    -- OAuth tokens belonging to individual signed-in users, so an agent can act
+    -- as the person chatting rather than as one shared service account.
+    -- Keyed on the provider's stable subject id (Google `sub`), not email, so a
+    -- rename doesn't orphan the grant.
+    CREATE TABLE IF NOT EXISTS user_credentials (
+        user_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT,
+        expires_at TEXT,
+        scopes TEXT,
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (user_id, provider)
+    );
 """
 
 
@@ -203,5 +218,70 @@ def delete_channel(channel_id):
     conn = _get_conn()
     conn.execute("DELETE FROM messages WHERE channel_id = ?", (channel_id,))
     conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Per-user OAuth credentials
+# ---------------------------------------------------------------------------
+
+
+def save_credentials(
+    user_id,
+    provider,
+    access_token,
+    refresh_token=None,
+    expires_at=None,
+    scopes=None,
+):
+    """Store (or replace) one provider grant for one user.
+
+    A refresh token is only issued on first consent, so an absent one must not
+    overwrite the stored value — otherwise re-consenting silently downgrades the
+    grant to access-token-only and it stops working an hour later.
+    """
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO user_credentials
+               (user_id, provider, access_token, refresh_token, expires_at, scopes, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(user_id, provider) DO UPDATE SET
+               access_token  = excluded.access_token,
+               refresh_token = COALESCE(excluded.refresh_token, user_credentials.refresh_token),
+               expires_at    = excluded.expires_at,
+               scopes        = excluded.scopes,
+               updated_at    = datetime('now')""",
+        (user_id, provider, access_token, refresh_token, expires_at, scopes),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_credentials(user_id, provider=None):
+    """Return this user's grants as {provider: {...}}."""
+    conn = _get_conn()
+    if provider:
+        rows = conn.execute(
+            "SELECT * FROM user_credentials WHERE user_id = ? AND provider = ?",
+            (user_id, provider),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM user_credentials WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    conn.close()
+    return {row["provider"]: dict(row) for row in rows}
+
+
+def delete_credentials(user_id, provider=None):
+    conn = _get_conn()
+    if provider:
+        conn.execute(
+            "DELETE FROM user_credentials WHERE user_id = ? AND provider = ?",
+            (user_id, provider),
+        )
+    else:
+        conn.execute("DELETE FROM user_credentials WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()

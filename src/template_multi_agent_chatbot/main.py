@@ -22,6 +22,7 @@ from template_multi_agent_chatbot.routing import (
     ROUTER_CONFIG,
     ROUTER_HISTORY_WINDOW,
 )
+from template_multi_agent_chatbot import user_context
 from template_multi_agent_chatbot.state import ChatbotState
 
 tracer_provider = register(
@@ -53,7 +54,13 @@ class ConversationalFlow(Flow[ChatbotState]):
     # AMP bridge
     # ------------------------------------------------------------------
 
-    def kickoff(self, inputs: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+    def kickoff(
+        self,
+        inputs: dict[str, Any] | None = None,
+        input_files: Any = None,
+        from_checkpoint: Any = None,
+        restore_from_state_id: str | None = None,
+    ) -> Any:
         """Turn an AMP kickoff into a conversational turn.
 
         AMP only exposes `POST /kickoff`, but the conversational runtime hydrates
@@ -64,13 +71,29 @@ class ConversationalFlow(Flow[ChatbotState]):
         So: a kickoff carrying `user_message` becomes one turn. `handle_turn()`
         re-enters this method with only `{"id": ...}`, which falls through to the
         normal path — that's the recursion base case, not an accident.
+
+        The signature spells out every parameter rather than using **kwargs
+        because AMP *introspects* it: with `restore_from_state_id` hidden behind
+        **kwargs, AMP's chat API concluded the deployment couldn't fork and
+        failed every message with a spurious "upgrade crewAI" error.
         """
+        passthrough = {
+            "input_files": input_files,
+            "from_checkpoint": from_checkpoint,
+            "restore_from_state_id": restore_from_state_id,
+        }
+
         if inputs and inputs.get("user_message") is not None:
             payload = dict(inputs)
             user_message = payload.pop("user_message")
             # Per-execution, deliberately not persisted: a webhook URL restored
             # from an earlier turn would point at a stale listener.
             object.__setattr__(self, "_webhook_url", payload.get("webhook_url"))
+            # Identity, never tokens. Held on the instance rather than in state,
+            # which @persist writes to disk and every trace event deep-copies.
+            user_context.load_for_turn(
+                payload.get("user_id"), payload.get("credentials_url")
+            )
             # Register the webhook listener up front. It can't wait for a handler
             # to touch it: `conversation_route_selected` fires before any handler
             # runs, and a `converse` turn never touches the bus at all.
@@ -78,9 +101,9 @@ class ConversationalFlow(Flow[ChatbotState]):
             return self.handle_turn(
                 user_message,
                 session_id=payload.get("id"),
-                **kwargs,
+                **passthrough,
             )
-        return super().kickoff(inputs=inputs, **kwargs)
+        return super().kickoff(inputs=inputs, **passthrough)
 
     @property
     def event_bus(self) -> ConversationalEventBus:

@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -141,6 +141,7 @@ _PUBLIC_ENDPOINTS = {
     "google_callback",
     "webhook",
     "webhook_preflight",
+    "internal_credentials",
     "static",
 }
 
@@ -223,7 +224,83 @@ def google_callback():
 
 @app.route("/api/me")
 def me():
-    return jsonify(session.get("user") or {"email": None})
+    user = session.get("user") or {"email": None}
+    if user.get("user_id"):
+        user = {**user, "connected": sorted(db.get_credentials(user["user_id"]))}
+    return jsonify(user)
+
+
+# ---------------------------------------------------------------------------
+# Credentials for the automation
+# ---------------------------------------------------------------------------
+
+
+def _fresh_google_token(user_id: str, record: dict) -> dict | None:
+    """Return a usable Google grant, refreshing it if the token has expired."""
+    expires_at = record.get("expires_at")
+    if expires_at:
+        try:
+            # 60s of slack so a token can't expire mid-turn.
+            if datetime.fromisoformat(expires_at) - timedelta(seconds=60) > datetime.now(
+                timezone.utc
+            ):
+                return record
+        except (ValueError, TypeError):
+            pass
+
+    if not record.get("refresh_token"):
+        return None
+
+    try:
+        refreshed = auth.refresh_access_token(record["refresh_token"])
+    except auth.AuthError as exc:
+        app.logger.warning("Google refresh failed for %s: %s", user_id, exc)
+        return None
+
+    expiry = datetime.now(timezone.utc) + timedelta(
+        seconds=int(refreshed.get("expires_in", 3600))
+    )
+    # The refresh response carries no new refresh token; save_credentials keeps
+    # the stored one rather than nulling it.
+    db.save_credentials(
+        user_id,
+        "google",
+        refreshed["access_token"],
+        expires_at=expiry.isoformat(),
+        scopes=refreshed.get("scope"),
+    )
+    return db.get_credentials(user_id, "google").get("google")
+
+
+@app.route("/api/internal/credentials/<user_id>", methods=["GET"])
+def internal_credentials(user_id):
+    """Hand the running automation the chatting user's OAuth tokens.
+
+    Deliberately a pull rather than a push: tokens must never ride in kickoff
+    inputs, because Flow merges inputs into state, @persist writes state to disk,
+    and state is deep-copied into every trace event — they would end up in both
+    SQLite and Arize. The flow passes only a user_id and fetches from here.
+
+    Authenticated with the same WEBHOOK_TOKEN the deployment already holds, and
+    exempt from the session gate for the same reason the webhook is: the caller
+    is a server, not a browser.
+    """
+    if request.headers.get("Authorization", "") != f"Bearer {WEBHOOK_TOKEN}":
+        return jsonify({"error": "unauthorized"}), 401
+
+    stored = db.get_credentials(user_id)
+    providers = {}
+    for provider, record in stored.items():
+        if provider == "google":
+            record = _fresh_google_token(user_id, record)
+            if not record:
+                continue
+        providers[provider] = {
+            "access_token": record["access_token"],
+            "scopes": record.get("scopes"),
+        }
+
+    return jsonify({"user_id": user_id, "providers": providers})
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -511,11 +588,18 @@ def send_message(channel_id):
     # fresh AMP process handles this turn. It must stay stable for the life of the
     # channel — this is why it's the channel's conversation_id and not the
     # previous kickoff_id we used to pass as restoreFromStateId.
+    # user_id, never tokens. The flow uses it to pull this person's credentials
+    # from /api/internal/credentials; sending the tokens themselves would put
+    # them into persisted flow state and every trace payload.
+    signed_in = session.get("user") or {}
+
     kickoff_body = {
         "inputs": {
             "id": channel["conversation_id"],
             "user_message": content,
             "webhook_url": callback_url,
+            "user_id": signed_in.get("user_id"),
+            "credentials_url": f"{_public_base_url()}/api/internal/credentials",
         },
         "webhooks": {
             "events": WEBHOOK_EVENTS,

@@ -27,6 +27,15 @@ def _load_app(monkeypatch, **overrides):
             monkeypatch.delenv(key, raising=False)
         else:
             monkeypatch.setenv(key, value)
+
+    # `auth` captures GOOGLE_CLIENT_ID at import, so it must be reloaded under
+    # this scenario's environment too. Reloading only `app` let a previous SSO
+    # test leave Google credentials in place, silently switching later
+    # password-path tests to the Google login page.
+    import auth as auth_module
+
+    importlib.reload(auth_module)
+
     import app as app_module
 
     reloaded = importlib.reload(app_module)
@@ -191,16 +200,7 @@ GOOGLE_ENV = {
 @pytest.fixture
 def sso(monkeypatch):
     """App with Google SSO configured instead of a shared password."""
-    import auth as auth_module
-
-    for key, value in GOOGLE_ENV.items():
-        if value is None:
-            monkeypatch.delenv(key, raising=False)
-        else:
-            monkeypatch.setenv(key, value)
-    importlib.reload(auth_module)
-    module = _load_app(monkeypatch, **GOOGLE_ENV)
-    return module
+    return _load_app(monkeypatch, **GOOGLE_ENV)
 
 
 def test_sso_takes_precedence_over_the_password_form(sso):
@@ -293,3 +293,75 @@ def test_identity_is_keyed_on_google_subject_not_email(sso, monkeypatch):
     )
 
     assert client.get("/api/me").get_json()["user_id"] == "stable-123"
+
+
+# ---------------------------------------------------------------------------
+# Per-user credentials
+# ---------------------------------------------------------------------------
+
+
+def test_credentials_endpoint_requires_the_shared_secret(client):
+    """The caller is a server, not a browser, so it's exempt from the session
+    gate — which makes the token check the only thing protecting it."""
+    assert client.get("/api/internal/credentials/u1").status_code == 401
+    assert client.get(
+        "/api/internal/credentials/u1", headers={"Authorization": "Bearer wrong"}
+    ).status_code == 401
+
+
+def test_credentials_endpoint_returns_only_that_users_grants(client):
+    import db
+
+    db.save_credentials("user-a", "slack", "token-a")
+    db.save_credentials("user-b", "slack", "token-b")
+    headers = {"Authorization": f"Bearer {BASE_ENV['WEBHOOK_TOKEN']}"}
+
+    a = client.get("/api/internal/credentials/user-a", headers=headers).get_json()
+    b = client.get("/api/internal/credentials/user-b", headers=headers).get_json()
+    db.delete_credentials("user-a")
+    db.delete_credentials("user-b")
+
+    assert a["providers"]["slack"]["access_token"] == "token-a"
+    assert b["providers"]["slack"]["access_token"] == "token-b"
+
+
+def test_kickoff_sends_user_id_but_never_tokens(client, monkeypatch):
+    """Tokens in inputs would be merged into flow state, persisted by @persist,
+    and deep-copied into every trace event."""
+    import app as app_module
+
+    captured = {}
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+
+        def json(self):
+            return {"kickoff_id": "k1"}
+
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured.update(json or {})
+        return FakeResponse()
+
+    monkeypatch.setattr(app_module.http_requests, "post", fake_post)
+
+    _sign_in(client)
+    with client.session_transaction() as sess:
+        sess["user"] = {"user_id": "google-sub-1", "email": "t@crewai.com"}
+    channel_id = client.post("/api/channels", json={"name": "u"}).get_json()["id"]
+    _send(client, channel_id)
+    for _ in range(50):
+        if captured:
+            break
+        import time
+
+        time.sleep(0.05)
+    client.delete(f"/api/channels/{channel_id}")
+
+    inputs = captured.get("inputs", {})
+    assert inputs.get("user_id") == "google-sub-1"
+    assert "credentials_url" in inputs
+    assert not any("token" in k for k in inputs), inputs

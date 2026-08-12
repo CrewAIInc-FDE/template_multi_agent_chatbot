@@ -125,3 +125,34 @@ def verify_user(userinfo: dict) -> dict:
         "name": userinfo.get("name") or email,
         "picture": userinfo.get("picture"),
     }
+
+
+# Scopes requested when a user connects mail/calendar. Kept separate from
+# BASE_SCOPES so signing in stays a low-friction consent and the heavier grant is
+# asked for only when someone actually wants it.
+GOOGLE_DATA_SCOPES = (
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/calendar.readonly",
+)
+
+
+def refresh_access_token(refresh_token: str) -> dict:
+    """Exchange a refresh token for a fresh access token.
+
+    Google access tokens last an hour, so anything long-running has to refresh.
+    The response does NOT include a new refresh token — the stored one stays
+    valid and must be kept.
+    """
+    response = requests.post(
+        _TOKEN_ENDPOINT,
+        data={
+            "refresh_token": refresh_token,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+        },
+        timeout=15,
+    )
+    if not response.ok:
+        raise AuthError("Could not refresh Google access. Reconnect your account.")
+    return response.json()
