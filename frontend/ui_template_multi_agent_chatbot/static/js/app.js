@@ -64,6 +64,44 @@
     renderChannelList();
   }
 
+
+  // ---------------------------------------------------------------------------
+  // Account panel: who you are, and what agents may act as on your behalf
+  // ---------------------------------------------------------------------------
+
+  async function loadAccount() {
+    const $panel = document.getElementById("account-panel");
+    const $email = document.getElementById("account-email");
+    const $connections = document.getElementById("account-connections");
+    if (!$panel) return;
+
+    let me;
+    try {
+      me = await api("/api/me");
+    } catch (err) {
+      return;
+    }
+    if (!me || !me.email) return;   // password mode or signed out: nothing to show
+
+    $panel.classList.remove("hidden");
+    $email.textContent = me.email;
+
+    const connected = (me.connected || []).includes("google");
+    $connections.innerHTML = connected
+      ? `<span class="account-connected">Google connected</span>
+         <button id="btn-disconnect-google" class="account-link">Disconnect</button>`
+      : `<a class="account-connect" href="/auth/google/connect">Connect Google</a>
+         <span class="account-hint">for mail &amp; calendar</span>`;
+
+    const $disconnect = document.getElementById("btn-disconnect-google");
+    if ($disconnect) {
+      $disconnect.addEventListener("click", async () => {
+        await api("/auth/google/disconnect", { method: "POST" });
+        loadAccount();
+      });
+    }
+  }
+
   function renderChannelList() {
     $channelList.innerHTML = "";
     channels.forEach((ch) => {
