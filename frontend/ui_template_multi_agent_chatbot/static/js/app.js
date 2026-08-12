@@ -81,17 +81,23 @@
     } catch (err) {
       return;
     }
-    if (!me || !me.email) return;   // password mode or signed out: nothing to show
+    if (!me || !me.authenticated) return;   // no login configured: nothing to show
 
     $panel.classList.remove("hidden");
-    $email.textContent = me.email;
+    $email.textContent = me.email || "Signed in";
 
     const connected = (me.connected || []).includes("google");
-    $connections.innerHTML = connected
-      ? `<span class="account-connected">Google connected</span>
-         <button id="btn-disconnect-google" class="account-link">Disconnect</button>`
-      : `<a class="account-connect" href="/auth/google/connect">Connect Google</a>
-         <span class="account-hint">for mail &amp; calendar</span>`;
+    const googleRow =
+      me.auth_mode !== "sso"
+        ? ""
+        : connected
+        ? `<span class="account-connected">Google connected</span>
+           <button id="btn-disconnect-google" class="account-link">Disconnect</button>`
+        : `<a class="account-connect" href="/auth/google/connect">Connect Google</a>
+           <span class="account-hint">for mail &amp; calendar</span>`;
+
+    $connections.innerHTML =
+      googleRow + `<a class="account-link account-signout" href="/logout">Sign out</a>`;
 
     const $disconnect = document.getElementById("btn-disconnect-google");
     if ($disconnect) {

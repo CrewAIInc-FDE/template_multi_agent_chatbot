@@ -271,9 +271,20 @@ def google_disconnect():
 
 @app.route("/api/me")
 def me():
-    user = session.get("user") or {"email": None}
+    """Who is signed in, and what the automation may act as on their behalf.
+
+    Reports `authenticated` explicitly: under the shared-password mode there is
+    no email, which is otherwise indistinguishable from being signed out and
+    would leave the UI unable to offer a sign-out control.
+    """
+    user = dict(session.get("user") or {})
+    user.setdefault("email", None)
+    user["authenticated"] = _is_authenticated() and _auth_enabled()
+    user["auth_mode"] = (
+        "sso" if auth.is_configured() else "password" if APP_PASSWORD else "none"
+    )
     if user.get("user_id"):
-        user = {**user, "connected": sorted(db.get_credentials(user["user_id"]))}
+        user["connected"] = sorted(db.get_credentials(user["user_id"]))
     return jsonify(user)
 
 

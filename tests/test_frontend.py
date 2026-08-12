@@ -365,3 +365,43 @@ def test_kickoff_sends_user_id_but_never_tokens(client, monkeypatch):
     assert inputs.get("user_id") == "google-sub-1"
     assert "credentials_url" in inputs
     assert not any("token" in k for k in inputs), inputs
+
+
+# ---------------------------------------------------------------------------
+# Sign out
+# ---------------------------------------------------------------------------
+
+
+def test_me_reports_authentication_in_password_mode(client):
+    """Password mode has no email, which is otherwise indistinguishable from
+    being signed out — the UI needs this to offer a sign-out control."""
+    _sign_in(client)
+
+    me = client.get("/api/me").get_json()
+
+    assert me["authenticated"] is True
+    assert me["auth_mode"] == "password"
+
+
+def test_signing_out_clears_the_session(client):
+    _sign_in(client)
+    assert client.get("/api/channels").status_code == 200
+
+    client.get("/logout")
+
+    assert client.get("/api/channels").status_code == 401
+    assert client.get("/api/me").status_code == 401
+
+
+def test_signing_out_does_not_revoke_stored_credentials(client):
+    """Signing out ends the browser session; it must not silently drop a grant
+    the user deliberately made, or reconnecting would be required every time."""
+    import db
+
+    db.save_credentials("signout-user", "google", "token")
+    _sign_in(client)
+    client.get("/logout")
+    remaining = db.get_credentials("signout-user")
+    db.delete_credentials("signout-user")
+
+    assert "google" in remaining

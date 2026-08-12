@@ -1043,3 +1043,9 @@ a.login-button {
   text-decoration: underline;
 }
 .account-link:hover { color: var(--text-primary); }
+
+/* Pushed to its own line so it never sits beside the connect control. */
+.account-signout {
+  flex-basis: 100%;
+  margin-top: 2px;
+}
