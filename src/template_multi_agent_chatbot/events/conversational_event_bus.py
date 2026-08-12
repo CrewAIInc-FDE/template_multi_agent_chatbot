@@ -1,6 +1,14 @@
+import base64
+import logging
+import tempfile
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 from crewai.events.event_bus import crewai_event_bus
+from crewai.experimental.conversational import ConversationMessage
+
+logger = logging.getLogger(__name__)
 
 from template_multi_agent_chatbot.events.listeners import ConversationalEventListener
 from template_multi_agent_chatbot.events.types import ImageGenerated
@@ -25,8 +33,16 @@ class ConversationalEventBus:
 
         The next turn's crew renders history into its task description, which is
         how the editing tool learns which image an edit refers to.
+
+        Appends a `ConversationMessage` rather than calling `Flow.append_message`,
+        which is the legacy ChatState path: it pushes a raw dict into
+        `state.messages`, typed `list[ConversationMessage]`, so pydantic emits a
+        PydanticSerializationUnexpectedValue warning every time state is
+        serialized — which is on every persisted method and every trace event.
         """
-        self._flow.append_message("tool", content)
+        self._flow.state.messages.append(
+            ConversationMessage(role="tool", content=content)
+        )
 
     def store_image(self, image_base64: str) -> str:
         """Persist an image in flow state and return its `image#N` reference.
@@ -48,3 +64,23 @@ class ConversationalEventBus:
                 result={"image": image_base64},
             ),
         )
+        if self._listener is None:
+            self._write_local_copy(image_base64)
+
+    def _write_local_copy(self, image_base64: str) -> None:
+        """Save the image where a human can open it.
+
+        Only when no webhook is configured — i.e. `uv run chat`, the probe, or a
+        bare kickoff. Those have no browser to deliver the image to, so without
+        this the agent cheerfully announces an image that exists solely as base64
+        inside flow state.
+        """
+        try:
+            directory = Path(tempfile.gettempdir()) / "crewai-chatbot-images"
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"{datetime.now().strftime('%H%M%S')}.png"
+            path.write_bytes(base64.b64decode(image_base64))
+            logger.info("Image saved locally: %s", path)
+            print(f"\n[image saved: {path}]\n")
+        except Exception as exc:
+            logger.warning("Could not save image locally: %s", exc)
