@@ -21,15 +21,23 @@ exercises the router (one small model call per case) without running crews.
 """
 
 import argparse
+import contextlib
+import io
+import json
+import logging
 import os
 import sys
 import time
 import uuid
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
+
+DEFAULT_REPORT = REPO_ROOT / "probe-report.json"
+QUIET = True
 
 # Prompt -> the route it should reach. Phrasings are deliberately varied: the
 # router's real failure mode is an indirect ask, not a keyword-perfect one.
@@ -97,10 +105,36 @@ class Recorder:
         return time.perf_counter() - self.started
 
 
+def quieten() -> None:
+    """Silence everything that isn't the probe's own output.
+
+    A full sweep otherwise buries the results under crew execution panels, the
+    Arize tracer banner, and a red 'No flow state found' per case (expected —
+    each case uses a fresh session id, so there is no snapshot to restore).
+    """
+    os.environ["CREW_VERBOSE"] = "false"
+    os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+    os.environ.setdefault("CREWAI_TELEMETRY_OPT_OUT", "true")
+    for name in ("crewai", "opentelemetry", "arize", "httpx", "LiteLLM"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+
+
+def import_flow(quiet: bool):
+    """Import the flow, optionally swallowing import-time banners."""
+    if not quiet:
+        import template_multi_agent_chatbot.main as main
+
+        return main
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+        import template_multi_agent_chatbot.main as main
+    return main
+
+
 def run_case(prompt: str, routing_only: bool) -> Recorder:
     from crewai.events.event_bus import crewai_event_bus
 
-    from template_multi_agent_chatbot.main import ConversationalFlow
+    ConversationalFlow = import_flow(QUIET).ConversationalFlow
 
     recorder = Recorder()
     recorder.register(crewai_event_bus)
@@ -125,12 +159,21 @@ def main() -> int:
     parser.add_argument("--route", help="only cases expecting this route")
     parser.add_argument("--repeat", type=int, default=1, help="runs per case")
     parser.add_argument("--list", action="store_true", help="list cases and exit")
+    parser.add_argument("--report", default=str(DEFAULT_REPORT),
+                        help="where to write the JSON report")
+    parser.add_argument("--verbose", action="store_true",
+                        help="keep crew panels and tracer banners")
     parser.add_argument(
         "--routing-only",
         action="store_true",
         help="stop after the routing decision (fast, no crews)",
     )
     args = parser.parse_args()
+
+    global QUIET
+    QUIET = not args.verbose
+    if QUIET:
+        quieten()
 
     from template_multi_agent_chatbot.routing.router_config import ROUTES
 
@@ -161,6 +204,7 @@ def main() -> int:
     failures: list[str] = []
     by_route: dict[str, list[float]] = defaultdict(list)
     routing_times: list[float] = []
+    records: list[dict] = []
 
     for prompt, expected in cases:
         for _ in range(args.repeat):
@@ -180,6 +224,17 @@ def main() -> int:
                 f"{rec.total_seconds:>7.1f}s  {tools}"
             )
 
+            records.append({
+                "prompt": prompt,
+                "expected": expected,
+                "actual": rec.route,
+                "ok": ok,
+                "routing_seconds": round(route_s, 3) if route_s else None,
+                "total_seconds": round(rec.total_seconds, 2),
+                "llm_calls": rec.llm_calls,
+                "tools": [{"name": n, "seconds": round(t, 2)} for n, t in rec.tools],
+                "errors": list(rec.errors),
+            })
             if not ok:
                 failures.append(f"{prompt!r} -> {rec.route} (expected {expected})")
             for err in rec.errors:
@@ -202,6 +257,16 @@ def main() -> int:
                 f"  {route:22} median {ordered[len(ordered) // 2]:>6.1f}s  "
                 f"max {ordered[-1]:>6.1f}s"
             )
+
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "routing-only" if args.routing_only else "full-turn",
+        "enabled_routes": sorted(enabled),
+        "cases": records,
+        "failures": failures,
+    }
+    Path(args.report).write_text(json.dumps(report, indent=2))
+    print(f"\nReport written to {args.report}")
 
     total = sum(len(v) for v in by_route.values()) or 1
     print(f"\nRouting accuracy: {total - len(failures)}/{total}")

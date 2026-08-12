@@ -8,3 +8,4 @@ AGENTS.md
 **/db/*.db-wal
 **/db/*.db-shm
 .venv/
+probe-report.json

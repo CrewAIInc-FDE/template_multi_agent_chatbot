@@ -5,6 +5,7 @@ from crewai.utilities.types import LLMMessage
 from crewai_tools import ScrapeWebsiteTool, SerperDevTool
 
 from template_multi_agent_chatbot.crews.history import format_history, utc_now
+from template_multi_agent_chatbot.crews.settings import crew_verbose
 
 _SEARCH_SKILL_PATH = str(
     Path(__file__).resolve().parent.parent / "skills" / "internet-searching"
@@ -79,7 +80,7 @@ KEY RULES:
             agents=[agent],
             tasks=[self._task(agent)],
             process=Process.sequential,
-            verbose=True,
+            verbose=crew_verbose(),
         )
 
     def execute(self) -> str:

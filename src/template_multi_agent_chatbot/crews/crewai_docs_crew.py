@@ -8,6 +8,7 @@ from crewai_tools import MongoDBVectorSearchConfig
 from pydantic import BaseModel
 
 from template_multi_agent_chatbot.crews.history import format_history, utc_now
+from template_multi_agent_chatbot.crews.settings import crew_verbose
 from template_multi_agent_chatbot.tools import TrackedMongoDBVectorSearchTool
 
 
@@ -96,7 +97,7 @@ KEY RULES:
             agents=[agent],
             tasks=[self._task(agent)],
             process=Process.sequential,
-            verbose=True,
+            verbose=crew_verbose(),
         )
 
     def execute(self) -> CrewExecutionResult:

@@ -5,6 +5,7 @@ from crewai import LLM, Agent, Crew, Process, Task
 from crewai.utilities.types import LLMMessage
 
 from template_multi_agent_chatbot.crews.history import format_history, utc_now
+from template_multi_agent_chatbot.crews.settings import crew_verbose
 from template_multi_agent_chatbot.events import ConversationalEventBus
 from template_multi_agent_chatbot.tools import (
     NanoBananaImageEditingTool,
@@ -93,7 +94,7 @@ CURRENT DATE AND TIME (UTC):
             agents=[agent],
             tasks=[self._task(agent)],
             process=Process.sequential,
-            verbose=True,
+            verbose=crew_verbose(),
         )
 
     def execute(self) -> str:

@@ -4,6 +4,7 @@ from crewai import LLM, Agent, Crew, Process, Task
 from crewai.utilities.types import LLMMessage
 
 from template_multi_agent_chatbot.crews.history import format_history, utc_now
+from template_multi_agent_chatbot.crews.settings import crew_verbose
 from template_multi_agent_chatbot.platform_health import warn_if_unavailable
 
 _SLACK_SKILL_PATH = str(Path(__file__).resolve().parent.parent / "skills" / "slack")
@@ -118,7 +119,7 @@ KEY RULES:
             agents=[agent],
             tasks=[self._task(agent)],
             process=Process.sequential,
-            verbose=True,
+            verbose=crew_verbose(),
         )
 
     def execute(self) -> str:
