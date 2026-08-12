@@ -95,3 +95,26 @@ def test_slack_allowlist_is_not_mutated_by_callers():
     slack_crew.slack_apps().append("slack/send_message")
 
     assert "slack/send_message" not in slack_crew.slack_apps()
+
+
+# ---------------------------------------------------------------------------
+# Skill loading
+# ---------------------------------------------------------------------------
+
+
+def test_every_skill_loads_with_instructions():
+    """Passing a skill's directory silently loads nothing: discover_skills()
+    scans a path's children for sub-dirs containing SKILL.md, so a directory
+    holding SKILL.md itself yields [] and the agent runs with no playbook and no
+    error. This asserts the contents actually arrive."""
+    from crewai.skills.loader import load_skills
+
+    from template_multi_agent_chatbot.crews.settings import SKILLS_DIR, load_skill
+
+    names = sorted(p.name for p in SKILLS_DIR.iterdir() if (p / "SKILL.md").is_file())
+    assert names, "no skills found on disk"
+
+    for name in names:
+        loaded = load_skills([load_skill(name)])
+        assert loaded, f"{name} resolved to no skill"
+        assert loaded[0].instructions, f"{name} loaded without instructions"

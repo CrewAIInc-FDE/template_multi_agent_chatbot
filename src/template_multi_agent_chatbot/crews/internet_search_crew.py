@@ -5,11 +5,7 @@ from crewai.utilities.types import LLMMessage
 from crewai_tools import ScrapeWebsiteTool, SerperDevTool
 
 from template_multi_agent_chatbot.crews.history import format_history, utc_now
-from template_multi_agent_chatbot.crews.settings import crew_verbose
-
-_SEARCH_SKILL_PATH = str(
-    Path(__file__).resolve().parent.parent / "skills" / "internet-searching"
-)
+from template_multi_agent_chatbot.crews.settings import crew_verbose, load_skill
 
 
 class InternetSearchCrew:
@@ -38,7 +34,7 @@ CITATION RULES:
 Any answer based on web search or scraping MUST end with a list of source URLs you
 actually consulted. Never omit sources and never fabricate a URL you didn't visit.""",
             llm=LLM(model="gemini/gemini-3.1-pro-preview", stream=True),
-            skills=[_SEARCH_SKILL_PATH],
+            skills=[load_skill("internet-searching")],
             tools=[
                 SerperDevTool(),
                 ScrapeWebsiteTool(),

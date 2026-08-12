@@ -8,7 +8,7 @@ from crewai_tools import MongoDBVectorSearchConfig
 from pydantic import BaseModel
 
 from template_multi_agent_chatbot.crews.history import format_history, utc_now
-from template_multi_agent_chatbot.crews.settings import crew_verbose
+from template_multi_agent_chatbot.crews.settings import crew_verbose, load_skill
 from template_multi_agent_chatbot.tools import TrackedMongoDBVectorSearchTool
 
 
@@ -16,10 +16,6 @@ class CrewExecutionResult(BaseModel):
     query_chunks: list[dict[str, list[dict[str, Any]]]]
     agent_response: str
 
-
-_DOCS_SKILL_PATH = str(
-    Path(__file__).resolve().parent.parent / "skills" / "crewai-docs"
-)
 
 
 class CrewaiDocsCrew:
@@ -48,7 +44,7 @@ valuable to the user.
 If the vector search returns no relevant results, say so honestly and suggest the user
 check the official docs at https://docs.crewai.com.""",
             llm=LLM(model="gemini/gemini-3.1-pro-preview", stream=True),
-            skills=[_DOCS_SKILL_PATH],
+            skills=[load_skill("crewai-docs")],
             tools=[
                 TrackedMongoDBVectorSearchTool(
                     query_chunks=self._query_chunks,

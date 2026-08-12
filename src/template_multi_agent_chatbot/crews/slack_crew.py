@@ -4,10 +4,9 @@ from crewai import LLM, Agent, Crew, Process, Task
 from crewai.utilities.types import LLMMessage
 
 from template_multi_agent_chatbot.crews.history import format_history, utc_now
-from template_multi_agent_chatbot.crews.settings import crew_verbose
+from template_multi_agent_chatbot.crews.settings import crew_verbose, load_skill
 from template_multi_agent_chatbot.platform_health import warn_if_unavailable
 
-_SLACK_SKILL_PATH = str(Path(__file__).resolve().parent.parent / "skills" / "slack")
 
 # Read-only Slack actions — the complete set this agent may use.
 #
@@ -79,7 +78,7 @@ say so plainly and suggest a different search term. Attribute quotes to the pers
 who actually wrote them, and say when a discussion is inconclusive rather than
 manufacturing a resolution.""",
             llm=LLM(model="gemini/gemini-3.1-pro-preview", stream=True),
-            skills=[_SLACK_SKILL_PATH],
+            skills=[load_skill("slack")],
             apps=apps,
             max_iter=8,
             allow_delegation=False,

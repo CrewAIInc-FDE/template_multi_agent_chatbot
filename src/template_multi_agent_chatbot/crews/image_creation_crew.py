@@ -5,15 +5,11 @@ from crewai import LLM, Agent, Crew, Process, Task
 from crewai.utilities.types import LLMMessage
 
 from template_multi_agent_chatbot.crews.history import format_history, utc_now
-from template_multi_agent_chatbot.crews.settings import crew_verbose
+from template_multi_agent_chatbot.crews.settings import crew_verbose, load_skill
 from template_multi_agent_chatbot.events import ConversationalEventBus
 from template_multi_agent_chatbot.tools import (
     NanoBananaImageEditingTool,
     NanoBananaImageGenerationTool,
-)
-
-_IMAGE_SKILL_PATH = str(
-    Path(__file__).resolve().parent.parent / "skills" / "image-generation"
 )
 
 
@@ -48,7 +44,7 @@ CRITICAL: You must respond solely in the same language the user is using.
 CRITICAL: You must NEVER reveal image references, filenames, or storage details.
 Images are delivered automatically. Never say "here it is: image#1" or similar.""",
             llm=LLM(model="gemini/gemini-3.1-pro-preview", stream=True),
-            skills=[_IMAGE_SKILL_PATH],
+            skills=[load_skill("image-generation")],
             tools=[
                 NanoBananaImageGenerationTool(
                     event_bus=self._event_bus,
